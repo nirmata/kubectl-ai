@@ -279,14 +279,14 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 	if httpResp.StatusCode != http.StatusOK {
 		defer httpResp.Body.Close()
 		body, _ := io.ReadAll(httpResp.Body)
-		
+
 		var errorMsg string
 		var jsonErr struct {
 			Error   string `json:"error"`
 			Message string `json:"message"`
 			Detail  string `json:"detail"`
 		}
-		
+
 		if err := json.Unmarshal(body, &jsonErr); err == nil {
 			if jsonErr.Error != "" {
 				errorMsg = jsonErr.Error
@@ -300,7 +300,7 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		} else {
 			errorMsg = string(body)
 		}
-		
+
 		return nil, &APIError{
 			StatusCode: httpResp.StatusCode,
 			Message:    fmt.Sprintf("HTTP %d", httpResp.StatusCode),
@@ -420,14 +420,14 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 
 	if httpResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(httpResp.Body)
-		
+
 		var errorMsg string
 		var jsonErr struct {
 			Error   string `json:"error"`
 			Message string `json:"message"`
 			Detail  string `json:"detail"`
 		}
-		
+
 		if err := json.Unmarshal(body, &jsonErr); err == nil {
 			if jsonErr.Error != "" {
 				errorMsg = jsonErr.Error
@@ -441,7 +441,7 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 		} else {
 			errorMsg = string(body)
 		}
-		
+
 		return &APIError{
 			StatusCode: httpResp.StatusCode,
 			Message:    fmt.Sprintf("HTTP %d", httpResp.StatusCode),
