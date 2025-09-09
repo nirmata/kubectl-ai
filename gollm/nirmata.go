@@ -15,7 +15,6 @@
 package gollm
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -156,6 +155,12 @@ type nirmataChatResponse struct {
 	Metadata any    `json:"metadata,omitempty"`
 }
 
+type nirmataStreamData struct {
+	Type    string `json:"type"`
+	Content string `json:"content,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
 func (c *nirmataChat) Initialize(history []*api.Message) error {
 	c.history = make([]nirmataMessage, 0, len(history))
 
@@ -248,15 +253,14 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	// Build URL with model parameter
 	u := c.client.baseURL.JoinPath("llm-apps").JoinPath("chat")
+	q := u.Query()
 	if c.model != "" {
-		q := u.Query()
 		q.Set("model", c.model)
-		u.RawQuery = q.Encode()
 	}
+	q.Set("chunked", "true")
+	u.RawQuery = q.Encode()
 
-	// Create streaming request
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
@@ -267,7 +271,6 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		httpReq.Header.Set("Authorization", "NIRMATA-API "+c.client.apiKey)
 	}
 
-	// Execute request
 	httpResp, err := c.client.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
@@ -276,55 +279,86 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 	if httpResp.StatusCode != http.StatusOK {
 		defer httpResp.Body.Close()
 		body, _ := io.ReadAll(httpResp.Body)
+		
+		var errorMsg string
+		var jsonErr struct {
+			Error   string `json:"error"`
+			Message string `json:"message"`
+			Detail  string `json:"detail"`
+		}
+		
+		if err := json.Unmarshal(body, &jsonErr); err == nil {
+			if jsonErr.Error != "" {
+				errorMsg = jsonErr.Error
+			} else if jsonErr.Message != "" {
+				errorMsg = jsonErr.Message
+			} else if jsonErr.Detail != "" {
+				errorMsg = jsonErr.Detail
+			} else {
+				errorMsg = string(body)
+			}
+		} else {
+			errorMsg = string(body)
+		}
+		
 		return nil, &APIError{
 			StatusCode: httpResp.StatusCode,
 			Message:    fmt.Sprintf("HTTP %d", httpResp.StatusCode),
-			Err:        fmt.Errorf("%s", body),
+			Err:        fmt.Errorf("%s", errorMsg),
 		}
 	}
 
-	// Update history with user message
 	c.history = append(c.history, userMessage)
 
-	// Return streaming iterator
 	return func(yield func(ChatResponse, error) bool) {
 		defer httpResp.Body.Close()
 
 		var fullContent strings.Builder
-		scanner := bufio.NewScanner(httpResp.Body)
+		decoder := json.NewDecoder(httpResp.Body)
 
-		// Process streaming chunks
-		for scanner.Scan() {
-			chunk := scanner.Text()
-			fullContent.WriteString(chunk)
-
-			response := &nirmataStreamResponse{
-				content: chunk,
-				model:   c.model,
-				done:    false,
+		for {
+			var streamData nirmataStreamData
+			if err := decoder.Decode(&streamData); err != nil {
+				if err == io.EOF {
+					break
+				}
+				continue
 			}
 
-			if !yield(response, nil) {
-				return
+			switch streamData.Type {
+			case "StreamDataTypeText":
+				if streamData.Content != "" {
+					fullContent.WriteString(streamData.Content)
+					response := &nirmataStreamResponse{
+						content: streamData.Content,
+						model:   c.model,
+						done:    false,
+					}
+					if !yield(response, nil) {
+						return
+					}
+				}
+			case "StreamDataTypeError":
+				if streamData.Error != "" {
+					yield(nil, fmt.Errorf("stream error: %s", streamData.Error))
+					return
+				}
+			case "StreamDataTypeToolStart", "StreamDataTypeToolComplete":
+				continue
+			case "StreamDataTypeInputText", "StreamDataTypeInputChoice":
+				continue
 			}
 		}
 
-		// Update chat history with complete response
 		if fullContent.Len() > 0 {
 			c.history = append(c.history, nirmataMessage{
 				Role:    "assistant",
 				Content: fullContent.String(),
 			})
 		}
-
-		// Check for scanner errors
-		if err := scanner.Err(); err != nil {
-			yield(nil, fmt.Errorf("stream error: %w", err))
-		}
 	}, nil
 }
 
-// convertContentsToMessage converts gollm contents to simple message
 func (c *nirmataChat) convertContentsToMessage(contents []any) nirmataMessage {
 	var contentStr strings.Builder
 
@@ -355,15 +389,12 @@ func (c *nirmataChat) convertContentsToMessage(contents []any) nirmataMessage {
 	}
 }
 
-// doRequestWithModel makes HTTP requests with model as query parameter
 func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model string, req any, resp any) error {
-	// Marshal request
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("marshaling request: %w", err)
 	}
 
-	// Build URL with query parameters
 	u := c.baseURL.JoinPath(endpoint)
 	if model != "" {
 		q := u.Query()
@@ -371,36 +402,53 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 		u.RawQuery = q.Encode()
 	}
 
-	// Create request
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
 
-	// Set headers
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
 		httpReq.Header.Set("Authorization", "NIRMATA-API "+c.apiKey)
 	}
 
-	// Execute
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("executing request: %w", err)
 	}
 	defer httpResp.Body.Close()
 
-	// Handle errors
 	if httpResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(httpResp.Body)
+		
+		var errorMsg string
+		var jsonErr struct {
+			Error   string `json:"error"`
+			Message string `json:"message"`
+			Detail  string `json:"detail"`
+		}
+		
+		if err := json.Unmarshal(body, &jsonErr); err == nil {
+			if jsonErr.Error != "" {
+				errorMsg = jsonErr.Error
+			} else if jsonErr.Message != "" {
+				errorMsg = jsonErr.Message
+			} else if jsonErr.Detail != "" {
+				errorMsg = jsonErr.Detail
+			} else {
+				errorMsg = string(body)
+			}
+		} else {
+			errorMsg = string(body)
+		}
+		
 		return &APIError{
 			StatusCode: httpResp.StatusCode,
 			Message:    fmt.Sprintf("HTTP %d", httpResp.StatusCode),
-			Err:        fmt.Errorf("%s", body),
+			Err:        fmt.Errorf("%s", errorMsg),
 		}
 	}
 
-	// Parse JSON response
 	return json.NewDecoder(httpResp.Body).Decode(resp)
 }
 
@@ -433,17 +481,16 @@ func (r *nirmataResponse) Candidates() []Candidate {
 
 // nirmataStreamResponse implements ChatResponse for streaming responses
 type nirmataStreamResponse struct {
-	content string
-	model   string
-	done    bool
+	content  string
+	metadata any
+	model    string
+	done     bool
 }
 
-// UsageMetadata returns the usage metadata from the streaming response
 func (r *nirmataStreamResponse) UsageMetadata() any {
 	return nil // No usage metadata in streaming chunks
 }
 
-// Candidates returns the candidate responses for streaming
 func (r *nirmataStreamResponse) Candidates() []Candidate {
 	if r.content == "" {
 		return []Candidate{}
@@ -456,49 +503,40 @@ func (r *nirmataStreamResponse) Candidates() []Candidate {
 	return []Candidate{candidate}
 }
 
-// nirmataCandidate implements Candidate for regular responses
 type nirmataCandidate struct {
 	text  string
 	model string
 }
 
-// String returns a string representation of the candidate
 func (c *nirmataCandidate) String() string {
 	return c.text
 }
 
-// Parts returns the parts of the candidate
 func (c *nirmataCandidate) Parts() []Part {
 	return []Part{&nirmataTextPart{text: c.text}}
 }
 
-// nirmataStreamCandidate implements Candidate for streaming responses
 type nirmataStreamCandidate struct {
 	content string
 	model   string
 }
 
-// String returns a string representation of the streaming candidate
 func (c *nirmataStreamCandidate) String() string {
 	return c.content
 }
 
-// Parts returns the parts of the streaming candidate
 func (c *nirmataStreamCandidate) Parts() []Part {
 	return []Part{&nirmataTextPart{text: c.content}}
 }
 
-// nirmataTextPart implements Part for text content
 type nirmataTextPart struct {
 	text string
 }
 
-// AsText returns the text content
 func (p *nirmataTextPart) AsText() (string, bool) {
 	return p.text, true
 }
 
-// AsFunctionCalls returns nil since this is a text part
 func (p *nirmataTextPart) AsFunctionCalls() ([]FunctionCall, bool) {
 	return nil, false
 }
@@ -518,7 +556,6 @@ func getNirmataModel(model string) string {
 	return DEFAULT_NIRMATA_MODEL
 }
 
-// nirmataCompletionResponse wraps a ChatResponse to implement CompletionResponse
 type nirmataCompletionResponse struct {
 	chatResponse ChatResponse
 }
