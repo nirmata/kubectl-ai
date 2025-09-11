@@ -15,6 +15,7 @@
 package gollm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -65,6 +66,9 @@ var _ Client = &NirmataClient{}
 
 func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, error) {
 	apiKey := os.Getenv(NIRMATA_APIKEY_ENV)
+	if apiKey == "" {
+		return nil, fmt.Errorf("%s environment variable not set", NIRMATA_APIKEY_ENV)
+	}
 
 	baseURLStr := os.Getenv(NIRMATA_ENDPOINT_ENV)
 	if baseURLStr == "" {
@@ -84,6 +88,12 @@ func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, 
 		httpClient: httpClient,
 		apiKey:     apiKey,
 	}, nil
+}
+
+// setAuthHeader sets the Authorization header using NIRMATA-API format.
+// Simple and clean like other providers (OpenAI, Grok, Gemini).
+func (c *NirmataClient) setAuthHeader(req *http.Request) {
+	req.Header.Set("Authorization", "NIRMATA-API "+c.apiKey)
 }
 
 func (c *NirmataClient) Close() error {
@@ -156,9 +166,9 @@ type nirmataChatResponse struct {
 }
 
 type nirmataStreamData struct {
-	Type    string `json:"type"`
-	Content string `json:"content,omitempty"`
-	Error   string `json:"error,omitempty"`
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	Data string `json:"data,omitempty"`
 }
 
 func (c *nirmataChat) Initialize(history []*api.Message) error {
@@ -217,7 +227,7 @@ func (c *nirmataChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 	messages := append(c.history, userMessage)
 	req := nirmataChatRequest{Messages: messages}
 	var resp nirmataChatResponse
-	if err := c.client.doRequestWithModel(ctx, "chat", c.model, req, &resp); err != nil {
+	if err := c.client.doRequestWithModel(ctx, "llm-apps/chat", c.model, req, &resp); err != nil {
 		return nil, err
 	}
 
@@ -259,6 +269,7 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		q.Set("model", c.model)
 	}
 	q.Set("chunked", "true")
+	q.Set("provider", "bedrock")
 	u.RawQuery = q.Encode()
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(body))
@@ -267,9 +278,7 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.client.apiKey != "" {
-		httpReq.Header.Set("Authorization", "NIRMATA-API "+c.client.apiKey)
-	}
+	c.client.setAuthHeader(httpReq)
 
 	httpResp, err := c.client.httpClient.Do(httpReq)
 	if err != nil {
@@ -314,23 +323,33 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		defer httpResp.Body.Close()
 
 		var fullContent strings.Builder
-		decoder := json.NewDecoder(httpResp.Body)
 
-		for {
-			var streamData nirmataStreamData
-			if err := decoder.Decode(&streamData); err != nil {
-				if err == io.EOF {
-					break
-				}
+		// Parse streaming JSONL response
+		klog.V(1).Info("Processing streaming JSONL response")
+		scanner := bufio.NewScanner(httpResp.Body)
+
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
 				continue
 			}
 
+			// Parse JSON stream data (JSONL format)
+			var streamData nirmataStreamData
+			if err := json.Unmarshal([]byte(line), &streamData); err != nil {
+				klog.V(3).Infof("Skipping non-JSON line: %q - %v", line, err)
+				continue
+			}
+
+			klog.V(3).Infof("Received stream data: ID=%s, Type=%s, Data=%q",
+				streamData.ID, streamData.Type, streamData.Data)
+
 			switch streamData.Type {
-			case "StreamDataTypeText":
-				if streamData.Content != "" {
-					fullContent.WriteString(streamData.Content)
+			case "Text":
+				if streamData.Data != "" {
+					fullContent.WriteString(streamData.Data)
 					response := &nirmataStreamResponse{
-						content: streamData.Content,
+						content: streamData.Data,
 						model:   c.model,
 						done:    false,
 					}
@@ -338,16 +357,24 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 						return
 					}
 				}
-			case "StreamDataTypeError":
-				if streamData.Error != "" {
-					yield(nil, fmt.Errorf("stream error: %s", streamData.Error))
+			case "Error":
+				if streamData.Data != "" {
+					yield(nil, fmt.Errorf("stream error: %s", streamData.Data))
 					return
 				}
-			case "StreamDataTypeToolStart", "StreamDataTypeToolComplete":
+			case "ToolStart", "ToolComplete":
+				klog.V(3).Infof("Skipping tool event: %s", streamData.Type)
 				continue
-			case "StreamDataTypeInputText", "StreamDataTypeInputChoice":
+			case "InputText", "InputChoice":
+				klog.V(3).Infof("Skipping input event: %s", streamData.Type)
 				continue
+			default:
+				klog.V(2).Infof("Unknown stream data type: %s", streamData.Type)
 			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			klog.V(2).Infof("Scanner error: %v", err)
 		}
 
 		if fullContent.Len() > 0 {
@@ -396,11 +423,12 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 	}
 
 	u := c.baseURL.JoinPath(endpoint)
+	q := u.Query()
 	if model != "" {
-		q := u.Query()
 		q.Set("model", model)
-		u.RawQuery = q.Encode()
 	}
+	q.Set("provider", "bedrock")
+	u.RawQuery = q.Encode()
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(body))
 	if err != nil {
@@ -408,9 +436,7 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		httpReq.Header.Set("Authorization", "NIRMATA-API "+c.apiKey)
-	}
+	c.setAuthHeader(httpReq)
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
