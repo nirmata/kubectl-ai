@@ -67,7 +67,7 @@ var _ Client = &NirmataClient{}
 func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, error) {
 	apiKey := os.Getenv(NIRMATA_APIKEY_ENV)
 	if apiKey == "" {
-		return nil, errors.New("NIRMATA_APIKEY environment variable not set")
+		return nil, fmt.Errorf("%s environment variable not set", NIRMATA_APIKEY_ENV)
 	}
 
 	baseURLStr := os.Getenv(NIRMATA_ENDPOINT_ENV)
