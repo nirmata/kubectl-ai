@@ -66,6 +66,9 @@ var _ Client = &NirmataClient{}
 
 func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, error) {
 	apiKey := os.Getenv(NIRMATA_APIKEY_ENV)
+	if apiKey == "" {
+		return nil, errors.New("NIRMATA_APIKEY environment variable not set")
+	}
 
 	baseURLStr := os.Getenv(NIRMATA_ENDPOINT_ENV)
 	if baseURLStr == "" {
@@ -85,6 +88,12 @@ func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, 
 		httpClient: httpClient,
 		apiKey:     apiKey,
 	}, nil
+}
+
+// setAuthHeader sets the Authorization header using NIRMATA-API format.
+// Simple and clean like other providers (OpenAI, Grok, Gemini).
+func (c *NirmataClient) setAuthHeader(req *http.Request) {
+	req.Header.Set("Authorization", "NIRMATA-API "+c.apiKey)
 }
 
 func (c *NirmataClient) Close() error {
@@ -269,14 +278,7 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.client.apiKey != "" {
-		// Detect if this is a JWT token (starts with eyJ) or API key
-		if strings.HasPrefix(c.client.apiKey, "eyJ") {
-			httpReq.Header.Set("Authorization", "NIRMATA-JWT "+c.client.apiKey)
-		} else {
-			httpReq.Header.Set("Authorization", "NIRMATA-API "+c.client.apiKey)
-		}
-	}
+	c.client.setAuthHeader(httpReq)
 
 	httpResp, err := c.client.httpClient.Do(httpReq)
 	if err != nil {
@@ -434,14 +436,7 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		// Detect if this is a JWT token (starts with eyJ) or API key
-		if strings.HasPrefix(c.apiKey, "eyJ") {
-			httpReq.Header.Set("Authorization", "NIRMATA-JWT "+c.apiKey)
-		} else {
-			httpReq.Header.Set("Authorization", "NIRMATA-API "+c.apiKey)
-		}
-	}
+	c.setAuthHeader(httpReq)
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
