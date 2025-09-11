@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -194,15 +196,28 @@ func (c *bedrockChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 		return nil, errors.New("no content provided")
 	}
 
-	// Process and append contents to conversation history
-	if err := c.addContentsToHistory(contents); err != nil {
+	// Process contents to conversation history but don't commit yet
+	// Only commit to conversation history when the request succeeds
+	var contentBlocks []types.ContentBlock
+	if err := c.processContents(contents, &contentBlocks); err != nil {
 		return nil, err
 	}
 
-	// Prepare the request
+	// Create a temporary message list that includes the new contents
+	tempMessages := make([]types.Message, len(c.messages))
+	copy(tempMessages, c.messages)
+
+	if len(contentBlocks) > 0 {
+		tempMessages = append(tempMessages, types.Message{
+			Role:    types.ConversationRoleUser,
+			Content: contentBlocks,
+		})
+	}
+
+	// Prepare the request using temporary messages
 	input := &bedrockruntime.ConverseInput{
 		ModelId:  aws.String(c.model),
-		Messages: c.messages,
+		Messages: tempMessages,
 		InferenceConfig: &types.InferenceConfiguration{
 			MaxTokens: aws.Int32(4096),
 		},
@@ -223,7 +238,17 @@ func (c *bedrockChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 	// Call the Bedrock Converse API
 	output, err := c.client.client.Converse(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("bedrock converse error: %w", err)
+		// Wrap AWS SDK errors as APIError when they contain status codes
+		wrappedErr := wrapAWSError(err)
+		return nil, fmt.Errorf("bedrock converse error: %w", wrappedErr)
+	}
+
+	// Only commit to conversation history if the request succeeded
+	if len(contentBlocks) > 0 {
+		c.messages = append(c.messages, types.Message{
+			Role:    types.ConversationRoleUser,
+			Content: contentBlocks,
+		})
 	}
 
 	// Extract response content and update conversation history
@@ -248,15 +273,28 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		return nil, errors.New("no content provided")
 	}
 
-	// Process and append contents to conversation history
-	if err := c.addContentsToHistory(contents); err != nil {
+	// Process contents to conversation history but don't commit yet
+	// Only commit to conversation history when the request succeeds
+	var contentBlocks []types.ContentBlock
+	if err := c.processContents(contents, &contentBlocks); err != nil {
 		return nil, err
 	}
 
-	// Prepare the streaming request
+	// Create a temporary message list that includes the new contents
+	tempMessages := make([]types.Message, len(c.messages))
+	copy(tempMessages, c.messages)
+
+	if len(contentBlocks) > 0 {
+		tempMessages = append(tempMessages, types.Message{
+			Role:    types.ConversationRoleUser,
+			Content: contentBlocks,
+		})
+	}
+
+	// Prepare the streaming request using temporary messages
 	input := &bedrockruntime.ConverseStreamInput{
 		ModelId:  aws.String(c.model),
-		Messages: c.messages,
+		Messages: tempMessages,
 		InferenceConfig: &types.InferenceConfiguration{
 			MaxTokens: aws.Int32(4096),
 		},
@@ -277,7 +315,9 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 	// Start the streaming request
 	output, err := c.client.client.ConverseStream(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("bedrock stream error: %w", err)
+		// Wrap AWS SDK errors as APIError when they contain status codes
+		wrappedErr := wrapAWSError(err)
+		return nil, fmt.Errorf("bedrock stream error: %w", wrappedErr)
 	}
 
 	// Return streaming iterator
@@ -397,6 +437,20 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 			}
 		}
 
+		// Check for stream errors first
+		if err := stream.Err(); err != nil {
+			yield(nil, fmt.Errorf("stream error: %w", err))
+			return
+		}
+
+		// Only commit to conversation history if the streaming succeeded
+		if len(contentBlocks) > 0 {
+			c.messages = append(c.messages, types.Message{
+				Role:    types.ConversationRoleUser,
+				Content: contentBlocks,
+			})
+		}
+
 		// Update conversation history with the full response
 		if fullContent.Len() > 0 {
 			assistantMessage.Content = append(assistantMessage.Content,
@@ -413,24 +467,16 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		if len(assistantMessage.Content) > 0 {
 			c.messages = append(c.messages, assistantMessage)
 		}
-
-		// Check for stream errors
-		if err := stream.Err(); err != nil {
-			yield(nil, fmt.Errorf("stream error: %w", err))
-		}
 	}, nil
 }
 
-// addContentsToHistory processes and appends user messages to chat history
-// following AWS Bedrock Converse API patterns
-func (c *bedrockChat) addContentsToHistory(contents []any) error {
-	var contentBlocks []types.ContentBlock
-
+// processContents processes contents into content blocks without modifying conversation history
+func (c *bedrockChat) processContents(contents []any, contentBlocks *[]types.ContentBlock) error {
 	for _, content := range contents {
 		switch c := content.(type) {
 		case string:
 			// Add text content block
-			contentBlocks = append(contentBlocks, &types.ContentBlockMemberText{Value: c})
+			*contentBlocks = append(*contentBlocks, &types.ContentBlockMemberText{Value: c})
 		case FunctionCallResult:
 			// Determine status based on Result content
 			status := types.ToolResultStatusSuccess
@@ -460,20 +506,11 @@ func (c *bedrockChat) addContentsToHistory(contents []any) error {
 				},
 				Status: status,
 			}
-			contentBlocks = append(contentBlocks, &types.ContentBlockMemberToolResult{Value: toolResult})
+			*contentBlocks = append(*contentBlocks, &types.ContentBlockMemberToolResult{Value: toolResult})
 		default:
 			return fmt.Errorf("unhandled content type: %T", content)
 		}
 	}
-
-	if len(contentBlocks) > 0 {
-		// Add user message with all content blocks to conversation history
-		c.messages = append(c.messages, types.Message{
-			Role:    types.ConversationRoleUser,
-			Content: contentBlocks,
-		})
-	}
-
 	return nil
 }
 
@@ -522,8 +559,12 @@ func (c *bedrockChat) SetFunctionDefinitions(functions []*FunctionDefinition) er
 	return nil
 }
 
-// IsRetryableError determines if an error is retryable
+// IsRetryableError determines if an error is retryable and prints debug info
 func (c *bedrockChat) IsRetryableError(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		fmt.Println("Retrying...")
+	}
 	return DefaultIsRetryableError(err)
 }
 
@@ -721,6 +762,55 @@ func (p *bedrockToolPart) AsFunctionCalls() ([]FunctionCall, bool) {
 }
 
 // Helper functions
+
+// parseAWSError extracts status code and error message from AWS SDK error messages
+// AWS SDK errors typically have the format: "operation error Service: Operation, ... StatusCode: 429, ..."
+func parseAWSError(err error) (statusCode int, message string, hasStatusCode bool) {
+	if err == nil {
+		return 0, "", false
+	}
+
+	errStr := err.Error()
+
+	// Look for StatusCode pattern in the error message
+	re := regexp.MustCompile(`StatusCode:\s*(\d+)`)
+	matches := re.FindStringSubmatch(errStr)
+	if len(matches) > 1 {
+		if code, parseErr := strconv.Atoi(matches[1]); parseErr == nil {
+			// Extract the error message after the status code
+			parts := strings.Split(errStr, "StatusCode:")
+			if len(parts) > 1 {
+				errorPart := strings.TrimSpace(parts[1])
+
+				if statusCodeEnd := strings.Index(errorPart, ","); statusCodeEnd != -1 {
+					errorPart = strings.TrimSpace(errorPart[statusCodeEnd+1:])
+				}
+
+				if colonIndex := strings.Index(errorPart, ":"); colonIndex != -1 {
+					errorPart = strings.TrimSpace(errorPart[colonIndex+1:])
+				}
+				return code, errorPart, true
+			}
+			return code, errStr, true
+		}
+	}
+
+	return 0, errStr, false
+}
+
+// wrapAWSError wraps AWS SDK errors as APIError when they contain status codes
+func wrapAWSError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	statusCode, message, hasStatusCode := parseAWSError(err)
+	if hasStatusCode {
+		return NewAPIError(statusCode, message, err)
+	}
+
+	return err
+}
 
 // getBedrockModel returns the model to use, checking in order:
 // 1. Explicitly provided model
