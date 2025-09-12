@@ -475,7 +475,12 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 		}
 	}
 
-	return json.NewDecoder(httpResp.Body).Decode(resp)
+	bodyBytes, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response body: %w", err)
+	}
+
+	return json.Unmarshal(bodyBytes, resp)
 }
 
 func (c *nirmataChat) SetFunctionDefinitions(functions []*FunctionDefinition) error {
