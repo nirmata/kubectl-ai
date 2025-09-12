@@ -41,12 +41,15 @@ func init() {
 const (
 	NIRMATA_APIKEY_ENV   = "NIRMATA_APIKEY"
 	NIRMATA_ENDPOINT_ENV = "NIRMATA_ENDPOINT"
+	NIRMATA_PROVIDER_REQUEST_SOURCE_ENV = "NIRMATA_PROVIDER_REQUEST_SOURCE"
 
 	DEFAULT_NIRMATA_ENDPOINT = "https://nirmata.io"
 
 	DEFAULT_NIRMATA_MODEL = "us.anthropic.claude-sonnet-4-20250514-v1:0"
 
 	DEFAULT_NIRMATA_REGION = "us-west-2"
+
+	DEFAULT_NIRMATA_PROVIDER_REQUEST_SOURCE = "NCH"
 )
 
 // newNirmataClientFactory creates a new Nirmata client with the given options
@@ -59,6 +62,7 @@ type NirmataClient struct {
 	baseURL    *url.URL
 	httpClient *http.Client
 	apiKey     string
+	requestSource string
 }
 
 // Ensure NirmataClient implements the Client interface
@@ -76,6 +80,12 @@ func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, 
 		baseURLStr = DEFAULT_NIRMATA_ENDPOINT
 	}
 
+	requestSource := os.Getenv(NIRMATA_PROVIDER_REQUEST_SOURCE_ENV)
+	if requestSource == "" {
+		klog.V(1).Infof("Using default provider request source: %s", DEFAULT_NIRMATA_PROVIDER_REQUEST_SOURCE)
+		requestSource = DEFAULT_NIRMATA_PROVIDER_REQUEST_SOURCE
+	}
+
 	baseURL, err := url.Parse(baseURLStr)
 	if err != nil {
 		return nil, fmt.Errorf("parsing base URL: %w", err)
@@ -87,6 +97,7 @@ func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, 
 		baseURL:    baseURL,
 		httpClient: httpClient,
 		apiKey:     apiKey,
+		requestSource: requestSource,
 	}, nil
 }
 
@@ -428,6 +439,7 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 		q.Set("model", model)
 	}
 	q.Set("provider", "bedrock")
+	q.Set("client_type", c.requestSource)
 	u.RawQuery = q.Encode()
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(body))
