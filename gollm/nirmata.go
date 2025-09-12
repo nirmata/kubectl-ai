@@ -56,9 +56,10 @@ func newNirmataClientFactory(ctx context.Context, opts ClientOptions) (Client, e
 
 // NirmataClient implements the gollm.Client interface for Nirmata models via HTTP
 type NirmataClient struct {
-	baseURL    *url.URL
-	httpClient *http.Client
-	apiKey     string
+	baseURL       *url.URL
+	httpClient    *http.Client
+	apiKey        string
+	supportsTools bool // Feature flag for tool support
 }
 
 // Ensure NirmataClient implements the Client interface
@@ -83,11 +84,32 @@ func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, 
 
 	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
 
-	return &NirmataClient{
+	client := &NirmataClient{
 		baseURL:    baseURL,
 		httpClient: httpClient,
 		apiKey:     apiKey,
-	}, nil
+	}
+
+	// Check for tool support
+	client.supportsTools = checkToolSupport(ctx, client)
+	if !client.supportsTools {
+		klog.Warning("Nirmata backend doesn't support tool calling, using fallback mode")
+	}
+
+	return client, nil
+}
+
+// checkToolSupport checks if the backend supports tool calling
+func checkToolSupport(ctx context.Context, client *NirmataClient) bool {
+	// Option 1: Check via environment variable override
+	if os.Getenv("NIRMATA_TOOLS_ENABLED") == "false" {
+		return false
+	}
+	
+	// Option 2: Default to true to attempt tool support
+	// The actual detection will happen when we try to use tools
+	// This allows for graceful degradation
+	return true
 }
 
 // setAuthHeader sets the Authorization header using NIRMATA-API format.
@@ -149,26 +171,57 @@ type nirmataChat struct {
 	model        string
 	history      []nirmataMessage
 	functionDefs []*FunctionDefinition
+	tools        []nirmataToolDef // Converted tools for API
 }
 
 type nirmataMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string            `json:"role"`
+	Content    string            `json:"content,omitempty"`
+	ToolCalls  []nirmataToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string            `json:"tool_call_id,omitempty"`
 }
 
 type nirmataChatRequest struct {
-	Messages []nirmataMessage `json:"messages"`
+	Messages   []nirmataMessage `json:"messages"`
+	Tools      []nirmataToolDef `json:"tools,omitempty"`
+	ToolChoice interface{}      `json:"tool_choice,omitempty"`
+	Model      string           `json:"model,omitempty"`
+	Stream     bool             `json:"stream,omitempty"`
 }
 
 type nirmataChatResponse struct {
-	Message  string `json:"message"`
-	Metadata any    `json:"metadata,omitempty"`
+	Message   string            `json:"message"`
+	ToolCalls []nirmataToolCall `json:"tool_calls,omitempty"`
+	Usage     *nirmataUsage     `json:"usage,omitempty"`
+	Metadata  any               `json:"metadata,omitempty"`
 }
 
 type nirmataStreamData struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
 	Data string `json:"data,omitempty"`
+}
+
+// Tool-related structures
+type nirmataToolDef struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Parameters  map[string]interface{} `json:"parameters"`
+}
+
+type nirmataToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type nirmataUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 func (c *nirmataChat) Initialize(history []*api.Message) error {
@@ -225,21 +278,40 @@ func (c *nirmataChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 
 	userMessage := c.convertContentsToMessage(contents)
 	messages := append(c.history, userMessage)
-	req := nirmataChatRequest{Messages: messages}
+	req := nirmataChatRequest{
+		Messages: messages,
+		Model:    c.model,
+	}
+	
+	// Add tools if supported
+	if c.client.supportsTools && len(c.tools) > 0 {
+		req.Tools = c.tools
+		req.ToolChoice = "auto"
+	}
+	
 	var resp nirmataChatResponse
 	if err := c.client.doRequestWithModel(ctx, "llm-apps/chat", c.model, req, &resp); err != nil {
 		return nil, err
 	}
 
 	c.history = append(c.history, userMessage)
-	c.history = append(c.history, nirmataMessage{
+	
+	// Create assistant message for history
+	assistantMsg := nirmataMessage{
 		Role:    "assistant",
 		Content: resp.Message,
-	})
+	}
+	if len(resp.ToolCalls) > 0 {
+		assistantMsg.ToolCalls = resp.ToolCalls
+	}
+	c.history = append(c.history, assistantMsg)
+	
 	response := &nirmataResponse{
-		message:  resp.Message,
-		metadata: resp.Metadata,
-		model:    c.model,
+		message:   resp.Message,
+		toolCalls: resp.ToolCalls,
+		usage:     resp.Usage,
+		metadata:  resp.Metadata,
+		model:     c.model,
 	}
 
 	return response, nil
@@ -257,7 +329,18 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 	messages := append(c.history, userMessage)
 
 	// Create request
-	req := nirmataChatRequest{Messages: messages}
+	req := nirmataChatRequest{
+		Messages: messages,
+		Model:    c.model,
+		Stream:   true,
+	}
+	
+	// Add tools if supported
+	if c.client.supportsTools && len(c.tools) > 0 {
+		req.Tools = c.tools
+		req.ToolChoice = "auto"
+	}
+	
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling request: %w", err)
@@ -388,7 +471,21 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 
 func (c *nirmataChat) convertContentsToMessage(contents []any) nirmataMessage {
 	var contentStr strings.Builder
+	
+	// Handle special case of FunctionCallResult
+	for _, content := range contents {
+		if fcr, ok := content.(FunctionCallResult); ok {
+			// Tool result message
+			resultJSON, _ := json.Marshal(fcr.Result)
+			return nirmataMessage{
+				Role:       "tool",
+				ToolCallID: fcr.ID,
+				Content:    string(resultJSON),
+			}
+		}
+	}
 
+	// Handle regular content
 	for i, content := range contents {
 		if i > 0 {
 			contentStr.WriteString(" ")
@@ -485,6 +582,45 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 
 func (c *nirmataChat) SetFunctionDefinitions(functions []*FunctionDefinition) error {
 	c.functionDefs = functions
+	
+	// Only convert if backend supports tools
+	if !c.client.supportsTools {
+		klog.V(2).Info("Skipping tool conversion - backend doesn't support tools")
+		return nil
+	}
+	
+	// Convert to Nirmata format
+	c.tools = make([]nirmataToolDef, 0, len(functions))
+	for _, fn := range functions {
+		tool := nirmataToolDef{
+			Name:        fn.Name,
+			Description: fn.Description,
+		}
+		
+		// Convert Schema to map
+		if fn.Parameters != nil {
+			jsonData, err := json.Marshal(fn.Parameters)
+			if err != nil {
+				return fmt.Errorf("marshal parameters for %s: %w", fn.Name, err)
+			}
+			
+			var params map[string]interface{}
+			if err := json.Unmarshal(jsonData, &params); err != nil {
+				return fmt.Errorf("unmarshal parameters for %s: %w", fn.Name, err)
+			}
+			tool.Parameters = params
+		} else {
+			// Provide minimal schema if none specified
+			tool.Parameters = map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			}
+		}
+		
+		c.tools = append(c.tools, tool)
+	}
+	
+	klog.V(1).Infof("Set %d function definitions for Nirmata chat", len(c.tools))
 	return nil
 }
 
@@ -493,9 +629,11 @@ func (c *nirmataChat) IsRetryableError(err error) bool {
 }
 
 type nirmataResponse struct {
-	message  string
-	metadata any
-	model    string
+	message   string
+	toolCalls []nirmataToolCall
+	usage     *nirmataUsage
+	metadata  any
+	model     string
 }
 
 func (r *nirmataResponse) UsageMetadata() any {
@@ -504,18 +642,21 @@ func (r *nirmataResponse) UsageMetadata() any {
 
 func (r *nirmataResponse) Candidates() []Candidate {
 	candidate := &nirmataCandidate{
-		text:  r.message,
-		model: r.model,
+		text:      r.message,
+		toolCalls: r.toolCalls,
+		model:     r.model,
 	}
 	return []Candidate{candidate}
 }
 
 // nirmataStreamResponse implements ChatResponse for streaming responses
 type nirmataStreamResponse struct {
-	content  string
-	metadata any
-	model    string
-	done     bool
+	content   string
+	toolCalls []nirmataToolCall
+	usage     *nirmataUsage
+	metadata  any
+	model     string
+	done      bool
 }
 
 func (r *nirmataStreamResponse) UsageMetadata() any {
@@ -523,20 +664,22 @@ func (r *nirmataStreamResponse) UsageMetadata() any {
 }
 
 func (r *nirmataStreamResponse) Candidates() []Candidate {
-	if r.content == "" {
+	if r.content == "" && len(r.toolCalls) == 0 && r.usage == nil {
 		return []Candidate{}
 	}
 
 	candidate := &nirmataStreamCandidate{
-		content: r.content,
-		model:   r.model,
+		content:   r.content,
+		toolCalls: r.toolCalls,
+		model:     r.model,
 	}
 	return []Candidate{candidate}
 }
 
 type nirmataCandidate struct {
-	text  string
-	model string
+	text      string
+	toolCalls []nirmataToolCall
+	model     string
 }
 
 func (c *nirmataCandidate) String() string {
@@ -544,12 +687,24 @@ func (c *nirmataCandidate) String() string {
 }
 
 func (c *nirmataCandidate) Parts() []Part {
-	return []Part{&nirmataTextPart{text: c.text}}
+	var parts []Part
+	
+	if c.text != "" {
+		parts = append(parts, &nirmataTextPart{text: c.text})
+	}
+	
+	for _, toolCall := range c.toolCalls {
+		tc := toolCall // Create a copy to avoid pointer issues
+		parts = append(parts, &nirmataToolPart{toolCall: &tc})
+	}
+	
+	return parts
 }
 
 type nirmataStreamCandidate struct {
-	content string
-	model   string
+	content   string
+	toolCalls []nirmataToolCall
+	model     string
 }
 
 func (c *nirmataStreamCandidate) String() string {
@@ -557,7 +712,18 @@ func (c *nirmataStreamCandidate) String() string {
 }
 
 func (c *nirmataStreamCandidate) Parts() []Part {
-	return []Part{&nirmataTextPart{text: c.content}}
+	var parts []Part
+	
+	if c.content != "" {
+		parts = append(parts, &nirmataTextPart{text: c.content})
+	}
+	
+	for _, toolCall := range c.toolCalls {
+		tc := toolCall // Create a copy to avoid pointer issues
+		parts = append(parts, &nirmataToolPart{toolCall: &tc})
+	}
+	
+	return parts
 }
 
 type nirmataTextPart struct {
@@ -570,6 +736,40 @@ func (p *nirmataTextPart) AsText() (string, bool) {
 
 func (p *nirmataTextPart) AsFunctionCalls() ([]FunctionCall, bool) {
 	return nil, false
+}
+
+// nirmataToolPart implements Part for tool/function calls - CRITICAL FIX
+type nirmataToolPart struct {
+	toolCall *nirmataToolCall
+}
+
+func (p *nirmataToolPart) AsText() (string, bool) {
+	return "", false
+}
+
+func (p *nirmataToolPart) AsFunctionCalls() ([]FunctionCall, bool) {
+	if p.toolCall == nil {
+		return nil, false
+	}
+	
+	// Parse arguments from JSON string
+	var args map[string]any
+	if p.toolCall.Function.Arguments != "" {
+		if err := json.Unmarshal([]byte(p.toolCall.Function.Arguments), &args); err != nil {
+			klog.V(2).Infof("Failed to unmarshal tool arguments: %v", err)
+			args = make(map[string]any)
+		}
+	} else {
+		args = make(map[string]any)
+	}
+	
+	funcCall := FunctionCall{
+		ID:        p.toolCall.ID,
+		Name:      p.toolCall.Function.Name,
+		Arguments: args,
+	}
+	
+	return []FunctionCall{funcCall}, true
 }
 
 func getNirmataModel(model string) string {
