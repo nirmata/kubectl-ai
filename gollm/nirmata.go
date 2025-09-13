@@ -101,14 +101,8 @@ func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, 
 
 // checkToolSupport checks if the backend supports tool calling
 func checkToolSupport(ctx context.Context, client *NirmataClient) bool {
-	// Option 1: Check via environment variable override
-	if os.Getenv("NIRMATA_TOOLS_ENABLED") == "false" {
-		return false
-	}
-	
-	// Option 2: Default to true to attempt tool support
-	// The actual detection will happen when we try to use tools
-	// This allows for graceful degradation
+	// Tool calling is required for Nirmata provider
+	// This matches the expectation that all providers must support tools
 	return true
 }
 
@@ -283,8 +277,8 @@ func (c *nirmataChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 		Model:    c.model,
 	}
 	
-	// Add tools if supported
-	if c.client.supportsTools && len(c.tools) > 0 {
+	// Add tools if defined (tools always supported like other providers)
+	if len(c.tools) > 0 {
 		req.Tools = c.tools
 		req.ToolChoice = "auto"
 	}
@@ -335,8 +329,8 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		Stream:   true,
 	}
 	
-	// Add tools if supported
-	if c.client.supportsTools && len(c.tools) > 0 {
+	// Add tools if defined (tools always supported like other providers)
+	if len(c.tools) > 0 {
 		req.Tools = c.tools
 		req.ToolChoice = "auto"
 	}
@@ -445,8 +439,36 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 					yield(nil, fmt.Errorf("stream error: %s", streamData.Data))
 					return
 				}
-			case "ToolStart", "ToolComplete":
-				klog.V(3).Infof("Skipping tool event: %s", streamData.Type)
+			case "ToolStart":
+				// Parse tool call from stream data
+				klog.V(3).Infof("Processing tool start event: %s", streamData.Data)
+				if streamData.Data != "" {
+					var toolData struct {
+						ToolCall nirmataToolCall `json:"tool_call"`
+					}
+					if err := json.Unmarshal([]byte(streamData.Data), &toolData); err == nil && toolData.ToolCall.ID != "" {
+						// Create a streaming response with tool call
+						response := &nirmataStreamResponse{
+							content:   "",
+							toolCalls: []nirmataToolCall{toolData.ToolCall},
+							model:     c.model,
+							done:      false,
+						}
+						if !yield(response, nil) {
+							return
+						}
+						// Add to history
+						c.history = append(c.history, nirmataMessage{
+							Role:      "assistant",
+							ToolCalls: []nirmataToolCall{toolData.ToolCall},
+						})
+					} else {
+						klog.V(2).Infof("Failed to parse tool call from stream: %v", err)
+					}
+				}
+			case "ToolComplete":
+				// Tool completion event - log for debugging
+				klog.V(3).Infof("Tool completed: %s", streamData.Data)
 				continue
 			case "InputText", "InputChoice":
 				klog.V(3).Infof("Skipping input event: %s", streamData.Type)
@@ -583,13 +605,7 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 func (c *nirmataChat) SetFunctionDefinitions(functions []*FunctionDefinition) error {
 	c.functionDefs = functions
 	
-	// Only convert if backend supports tools
-	if !c.client.supportsTools {
-		klog.V(2).Info("Skipping tool conversion - backend doesn't support tools")
-		return nil
-	}
-	
-	// Convert to Nirmata format
+	// Convert to Nirmata format (tools always supported like other providers)
 	c.tools = make([]nirmataToolDef, 0, len(functions))
 	for _, fn := range functions {
 		tool := nirmataToolDef{
