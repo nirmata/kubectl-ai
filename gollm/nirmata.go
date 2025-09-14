@@ -90,11 +90,8 @@ func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, 
 		apiKey:     apiKey,
 	}
 
-	// Check for tool support
-	client.supportsTools = checkToolSupport(ctx, client)
-	if !client.supportsTools {
-		klog.Warning("Nirmata backend doesn't support tool calling, using fallback mode")
-	}
+	// Tool calling is required for Nirmata provider
+	client.supportsTools = true
 
 	return client, nil
 }
@@ -198,6 +195,11 @@ type nirmataStreamData struct {
 
 // Tool-related structures
 type nirmataToolDef struct {
+	Type     string              `json:"type"`
+	Function nirmataToolFunction `json:"function"`
+}
+
+type nirmataToolFunction struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	Parameters  map[string]interface{} `json:"parameters"`
@@ -608,31 +610,38 @@ func (c *nirmataChat) SetFunctionDefinitions(functions []*FunctionDefinition) er
 	// Convert to Nirmata format (tools always supported like other providers)
 	c.tools = make([]nirmataToolDef, 0, len(functions))
 	for _, fn := range functions {
-		tool := nirmataToolDef{
+		// Create the function definition
+		functionDef := nirmataToolFunction{
 			Name:        fn.Name,
 			Description: fn.Description,
 		}
-		
+
 		// Convert Schema to map
 		if fn.Parameters != nil {
 			jsonData, err := json.Marshal(fn.Parameters)
 			if err != nil {
 				return fmt.Errorf("marshal parameters for %s: %w", fn.Name, err)
 			}
-			
+
 			var params map[string]interface{}
 			if err := json.Unmarshal(jsonData, &params); err != nil {
 				return fmt.Errorf("unmarshal parameters for %s: %w", fn.Name, err)
 			}
-			tool.Parameters = params
+			functionDef.Parameters = params
 		} else {
 			// Provide minimal schema if none specified
-			tool.Parameters = map[string]interface{}{
+			functionDef.Parameters = map[string]interface{}{
 				"type":       "object",
 				"properties": map[string]interface{}{},
 			}
 		}
-		
+
+		// Wrap in the tool structure with type
+		tool := nirmataToolDef{
+			Type:     "function",
+			Function: functionDef,
+		}
+
 		c.tools = append(c.tools, tool)
 	}
 	
