@@ -348,8 +348,6 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		q.Set("model", c.model)
 	}
 	q.Set("chunked", "true")
-	// Issue #4 fix: Don't force provider - let backend decide based on its configuration
-	// Removed: q.Set("provider", "bedrock")
 	u.RawQuery = q.Encode()
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(body))
@@ -466,9 +464,7 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 							ToolCalls: []nirmataToolCall{toolData.ToolCall},
 						})
 					} else {
-						// Make parse errors visible to users (Issue #2 fix)
 						klog.Errorf("Failed to parse tool call from stream data: %v (data: %q)", err, streamData.Data)
-						// Send error to user so they can see what went wrong
 						response := &nirmataStreamResponse{
 							content: fmt.Sprintf("[Tool parsing error: %v]", err),
 							model:   c.model,
@@ -786,16 +782,11 @@ func (p *nirmataToolPart) AsFunctionCalls() ([]FunctionCall, bool) {
 		return nil, false
 	}
 
-	// Parse arguments from JSON string (Issue #5 fix: better error handling)
 	var args map[string]any
 	if p.toolCall.Function.Arguments != "" {
-		// Try to unmarshal as JSON string first
 		if err := json.Unmarshal([]byte(p.toolCall.Function.Arguments), &args); err != nil {
-			// Make error visible to help debugging
 			klog.Errorf("Failed to parse tool arguments for %s: %v (raw: %q)",
 				p.toolCall.Function.Name, err, p.toolCall.Function.Arguments)
-
-			// Use empty args but make it clear there was an issue
 			args = make(map[string]any)
 			args["_parse_error"] = fmt.Sprintf("Failed to parse arguments: %v", err)
 		}
