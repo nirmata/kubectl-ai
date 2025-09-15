@@ -39,8 +39,8 @@ func init() {
 }
 
 const (
-	NIRMATA_APIKEY_ENV   = "NIRMATA_APIKEY"
-	NIRMATA_ENDPOINT_ENV = "NIRMATA_ENDPOINT"
+	NIRMATA_APIKEY_ENV                  = "NIRMATA_APIKEY"
+	NIRMATA_ENDPOINT_ENV                = "NIRMATA_ENDPOINT"
 	NIRMATA_PROVIDER_REQUEST_SOURCE_ENV = "NIRMATA_PROVIDER_REQUEST_SOURCE"
 
 	DEFAULT_NIRMATA_ENDPOINT = "https://nirmata.io"
@@ -95,9 +95,9 @@ func NewNirmataClient(ctx context.Context, opts ClientOptions) (*NirmataClient, 
 	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
 
 	client := &NirmataClient{
-		baseURL:    baseURL,
-		httpClient: httpClient,
-		apiKey:     apiKey,
+		baseURL:       baseURL,
+		httpClient:    httpClient,
+		apiKey:        apiKey,
 		requestSource: requestSource,
 	}
 
