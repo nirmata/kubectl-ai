@@ -278,20 +278,20 @@ func (c *nirmataChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 		Messages: messages,
 		Model:    c.model,
 	}
-	
+
 	// Add tools if defined (tools always supported like other providers)
 	if len(c.tools) > 0 {
 		req.Tools = c.tools
 		req.ToolChoice = "auto"
 	}
-	
+
 	var resp nirmataChatResponse
 	if err := c.client.doRequestWithModel(ctx, "llm-apps/chat", c.model, req, &resp); err != nil {
 		return nil, err
 	}
 
 	c.history = append(c.history, userMessage)
-	
+
 	// Create assistant message for history
 	assistantMsg := nirmataMessage{
 		Role:    "assistant",
@@ -301,7 +301,7 @@ func (c *nirmataChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 		assistantMsg.ToolCalls = resp.ToolCalls
 	}
 	c.history = append(c.history, assistantMsg)
-	
+
 	response := &nirmataResponse{
 		message:   resp.Message,
 		toolCalls: resp.ToolCalls,
@@ -330,13 +330,13 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		Model:    c.model,
 		Stream:   true,
 	}
-	
+
 	// Add tools if defined (tools always supported like other providers)
 	if len(c.tools) > 0 {
 		req.Tools = c.tools
 		req.ToolChoice = "auto"
 	}
-	
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling request: %w", err)
@@ -504,7 +504,7 @@ func (c *nirmataChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 
 func (c *nirmataChat) convertContentsToMessage(contents []any) nirmataMessage {
 	var contentStr strings.Builder
-	
+
 	// Handle special case of FunctionCallResult
 	for _, content := range contents {
 		if fcr, ok := content.(FunctionCallResult); ok {
@@ -615,7 +615,7 @@ func (c *NirmataClient) doRequestWithModel(ctx context.Context, endpoint, model 
 
 func (c *nirmataChat) SetFunctionDefinitions(functions []*FunctionDefinition) error {
 	c.functionDefs = functions
-	
+
 	// Convert to Nirmata format (tools always supported like other providers)
 	c.tools = make([]nirmataToolDef, 0, len(functions))
 	for _, fn := range functions {
@@ -653,7 +653,7 @@ func (c *nirmataChat) SetFunctionDefinitions(functions []*FunctionDefinition) er
 
 		c.tools = append(c.tools, tool)
 	}
-	
+
 	klog.V(1).Infof("Set %d function definitions for Nirmata chat", len(c.tools))
 	return nil
 }
@@ -722,16 +722,16 @@ func (c *nirmataCandidate) String() string {
 
 func (c *nirmataCandidate) Parts() []Part {
 	var parts []Part
-	
+
 	if c.text != "" {
 		parts = append(parts, &nirmataTextPart{text: c.text})
 	}
-	
+
 	for _, toolCall := range c.toolCalls {
 		tc := toolCall // Create a copy to avoid pointer issues
 		parts = append(parts, &nirmataToolPart{toolCall: &tc})
 	}
-	
+
 	return parts
 }
 
@@ -747,16 +747,16 @@ func (c *nirmataStreamCandidate) String() string {
 
 func (c *nirmataStreamCandidate) Parts() []Part {
 	var parts []Part
-	
+
 	if c.content != "" {
 		parts = append(parts, &nirmataTextPart{text: c.content})
 	}
-	
+
 	for _, toolCall := range c.toolCalls {
 		tc := toolCall // Create a copy to avoid pointer issues
 		parts = append(parts, &nirmataToolPart{toolCall: &tc})
 	}
-	
+
 	return parts
 }
 
@@ -785,7 +785,7 @@ func (p *nirmataToolPart) AsFunctionCalls() ([]FunctionCall, bool) {
 	if p.toolCall == nil {
 		return nil, false
 	}
-	
+
 	// Parse arguments from JSON string (Issue #5 fix: better error handling)
 	var args map[string]any
 	if p.toolCall.Function.Arguments != "" {
@@ -802,13 +802,13 @@ func (p *nirmataToolPart) AsFunctionCalls() ([]FunctionCall, bool) {
 	} else {
 		args = make(map[string]any)
 	}
-	
+
 	funcCall := FunctionCall{
 		ID:        p.toolCall.ID,
 		Name:      p.toolCall.Function.Name,
 		Arguments: args,
 	}
-	
+
 	return []FunctionCall{funcCall}, true
 }
 

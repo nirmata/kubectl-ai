@@ -1,3 +1,17 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package gollm
 
 import (
@@ -167,16 +181,16 @@ func TestErrorVisibilityComprehensive(t *testing.T) {
 // TestProviderRoutingComprehensive tests provider parameter handling (Issue #4)
 func TestProviderRoutingComprehensive(t *testing.T) {
 	testCases := []struct {
-		name             string
-		clientEndpoint   string
-		model           string
-		expectProvider   bool
-		validateURL      func(t *testing.T, u *url.URL)
+		name           string
+		clientEndpoint string
+		model          string
+		expectProvider bool
+		validateURL    func(t *testing.T, u *url.URL)
 	}{
 		{
 			name:           "Standard request without forced provider",
 			clientEndpoint: "https://api.nirmata.io",
-			model:         "claude-3-5-sonnet",
+			model:          "claude-3-5-sonnet",
 			expectProvider: false,
 			validateURL: func(t *testing.T, u *url.URL) {
 				if u.Query().Get("provider") != "" {
@@ -190,7 +204,7 @@ func TestProviderRoutingComprehensive(t *testing.T) {
 		{
 			name:           "Request with custom endpoint",
 			clientEndpoint: "https://custom.nirmata.io",
-			model:         "gpt-4",
+			model:          "gpt-4",
 			expectProvider: false,
 			validateURL: func(t *testing.T, u *url.URL) {
 				if strings.Contains(u.String(), "provider=bedrock") {
@@ -201,7 +215,7 @@ func TestProviderRoutingComprehensive(t *testing.T) {
 		{
 			name:           "Request with empty model",
 			clientEndpoint: "https://api.nirmata.io",
-			model:         "",
+			model:          "",
 			expectProvider: false,
 			validateURL: func(t *testing.T, u *url.URL) {
 				if u.Query().Get("provider") != "" {
