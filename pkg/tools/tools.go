@@ -134,7 +134,7 @@ func (t *Tools) ParseToolInvocation(ctx context.Context, name string, arguments 
 	}, nil
 }
 
-func (t *Tools) BuildToolCall(tool Tool, name string, arguments map[string]any) *ToolCall {
+func BuildToolCall(tool Tool, name string, arguments map[string]any) *ToolCall {
 	return &ToolCall{
 		tool:      tool,
 		name:      name,
