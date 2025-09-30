@@ -512,15 +512,6 @@ func (c *bedrockChat) processContents(contents []any, contentBlocks *[]types.Con
 		}
 	}
 
-	if len(*contentBlocks) > 0 {
-		// Add user message with all content blocks to conversation history
-		contentCopy := append([]types.ContentBlock(nil), *contentBlocks...)
-		c.messages = append(c.messages, types.Message{
-			Role:    types.ConversationRoleUser,
-			Content: contentCopy,
-		})
-	}
-
 	return nil
 }
 
@@ -561,8 +552,8 @@ func (c *bedrockChat) SetFunctionDefinitions(functions []*FunctionDefinition) er
 
 	c.toolConfig = &types.ToolConfiguration{
 		Tools: tools,
-		ToolChoice: &types.ToolChoiceMemberAny{
-			Value: types.AnyToolChoice{},
+		ToolChoice: &types.ToolChoiceMemberAuto{
+			Value: types.AutoToolChoice{},
 		},
 	}
 
