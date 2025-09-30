@@ -68,6 +68,10 @@ func (t *MCPTool) Name() string {
 	return t.toolName
 }
 
+func (t *MCPTool) UniqueToolName() string {
+	return fmt.Sprintf("%s_%s", t.serverName, t.toolName)
+}
+
 // ServerName returns the MCP server name.
 func (t *MCPTool) ServerName() string {
 	return t.serverName

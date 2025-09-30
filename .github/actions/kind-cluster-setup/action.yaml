@@ -10,9 +10,11 @@ runs:
   steps:
     - uses: actions/checkout@v4
     - name: Create k8s Kind Cluster
-      uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # @v1.12.0
+      uses: helm/kind-action@v1.12.0
       with:
         cluster_name: ${{ inputs.cluster_name }}
+        wait: 300s
+
     - uses: "google-github-actions/auth@v2"
       with:
         project_id: "sunilarora-fp"

@@ -2,7 +2,9 @@
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/GoogleCloudPlatform/kubectl-ai)](https://goreportcard.com/report/github.com/GoogleCloudPlatform/kubectl-ai)
 ![GitHub License](https://img.shields.io/github/license/GoogleCloudPlatform/kubectl-ai)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/GoogleCloudPlatform/kubectl-ai)
 [![GitHub stars](https://img.shields.io/github/stars/GoogleCloudPlatform/kubectl-ai.svg)](https://github.com/GoogleCloudPlatform/kubectl-ai/stargazers)
+
 
 `kubectl-ai` acts as an intelligent interface, translating user intent into
 precise Kubernetes operations, making Kubernetes management more accessible and
@@ -427,6 +429,14 @@ This creates a powerful **tool aggregation hub** where kubectl-ai acts as both:
 
 - **MCP Server**: Exposing kubectl tools to clients
 - **MCP Client**: Consuming tools from other MCP servers
+
+To serve clients over HTTP using the streamable transport, run:
+
+```bash
+kubectl-ai --mcp-server --mcp-server-mode streamable-http --http-port 9080
+```
+
+This starts an MCP endpoint at `http://localhost:9080/mcp`.
 
 The enhanced mode provides AI clients with access to both Kubernetes operations and general-purpose tools (filesystem, web search, databases, etc.) through a single MCP endpoint.
 

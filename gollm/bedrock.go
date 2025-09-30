@@ -473,22 +473,22 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 // processContents processes contents into content blocks without modifying conversation history
 func (c *bedrockChat) processContents(contents []any, contentBlocks *[]types.ContentBlock) error {
 	for _, content := range contents {
-		switch c := content.(type) {
+		switch v := content.(type) {
 		case string:
 			// Add text content block
-			*contentBlocks = append(*contentBlocks, &types.ContentBlockMemberText{Value: c})
+			*contentBlocks = append(*contentBlocks, &types.ContentBlockMemberText{Value: v})
 		case FunctionCallResult:
 			// Determine status based on Result content
 			status := types.ToolResultStatusSuccess
-			if c.Result != nil {
+			if v.Result != nil {
 				// Check for error field
-				if errorVal, hasError := c.Result["error"]; hasError {
+				if errorVal, hasError := v.Result["error"]; hasError {
 					if errorBool, isBool := errorVal.(bool); isBool && errorBool {
 						status = types.ToolResultStatusError
 					}
 				}
 				// Check for status field
-				if statusVal, hasStatus := c.Result["status"]; hasStatus {
+				if statusVal, hasStatus := v.Result["status"]; hasStatus {
 					if statusStr, isString := statusVal.(string); isString &&
 						(statusStr == "failed" || statusStr == "error") {
 						status = types.ToolResultStatusError
@@ -498,10 +498,10 @@ func (c *bedrockChat) processContents(contents []any, contentBlocks *[]types.Con
 
 			// Convert to AWS Bedrock ToolResultBlock format per official docs
 			toolResult := types.ToolResultBlock{
-				ToolUseId: aws.String(c.ID),
+				ToolUseId: aws.String(v.ID),
 				Content: []types.ToolResultContentBlock{
 					&types.ToolResultContentBlockMemberJson{
-						Value: document.NewLazyDocument(c.Result),
+						Value: document.NewLazyDocument(v.Result),
 					},
 				},
 				Status: status,
@@ -511,6 +511,16 @@ func (c *bedrockChat) processContents(contents []any, contentBlocks *[]types.Con
 			return fmt.Errorf("unhandled content type: %T", content)
 		}
 	}
+
+	if len(*contentBlocks) > 0 {
+		// Add user message with all content blocks to conversation history
+		contentCopy := append([]types.ContentBlock(nil), *contentBlocks...)
+		c.messages = append(c.messages, types.Message{
+			Role:    types.ConversationRoleUser,
+			Content: contentCopy,
+		})
+	}
+
 	return nil
 }
 
@@ -551,8 +561,8 @@ func (c *bedrockChat) SetFunctionDefinitions(functions []*FunctionDefinition) er
 
 	c.toolConfig = &types.ToolConfiguration{
 		Tools: tools,
-		ToolChoice: &types.ToolChoiceMemberAuto{
-			Value: types.AutoToolChoice{},
+		ToolChoice: &types.ToolChoiceMemberAny{
+			Value: types.AnyToolChoice{},
 		},
 	}
 

@@ -59,6 +59,10 @@ type Tools struct {
 	tools map[string]Tool
 }
 
+func (t *Tools) Init() {
+	t.tools = make(map[string]Tool)
+}
+
 func (t *Tools) Lookup(name string) Tool {
 	return t.tools[name]
 }
@@ -77,10 +81,18 @@ func (t *Tools) Names() []string {
 }
 
 func (t *Tools) RegisterTool(tool Tool) {
-	if _, exists := t.tools[tool.Name()]; exists {
-		panic("tool already registered: " + tool.Name())
+	// if mcp tool use unique name
+	name := tool.Name()
+	// For MCP tools, we need to use a unique name to avoid conflicts
+	// with built-in tools or tools from other MCP servers.
+	if mcpTool, ok := tool.(*MCPTool); ok {
+		name = mcpTool.UniqueToolName()
 	}
-	t.tools[tool.Name()] = tool
+
+	if _, exists := t.tools[name]; exists {
+		panic("tool already registered: " + name)
+	}
+	t.tools[name] = tool
 }
 
 type ToolCall struct {

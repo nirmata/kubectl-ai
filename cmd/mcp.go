@@ -32,11 +32,11 @@ type kubectlMCPServer struct {
 	tools         tools.Tools
 	workDir       string
 	mcpManager    *mcp.Manager // Add MCP manager for external tool calls
-	mcpServerMode string       // Server mode (e.g., "mcd", "sse")
-	sseEndpoint   int          // SSE endpoint for server mode
+	mcpServerMode string       // Server mode (e.g., "streamable-http", "sse")
+	httpPort      int          // Port for HTTP-based server modes
 }
 
-func newKubectlMCPServer(ctx context.Context, kubectlConfig string, tools tools.Tools, workDir string, exposeExternalTools bool, serverMode string, sseEndpoint int) (*kubectlMCPServer, error) {
+func newKubectlMCPServer(ctx context.Context, kubectlConfig string, tools tools.Tools, workDir string, exposeExternalTools bool, serverMode string, httpPort int) (*kubectlMCPServer, error) {
 	s := &kubectlMCPServer{
 		kubectlConfig: kubectlConfig,
 		workDir:       workDir,
@@ -47,7 +47,7 @@ func newKubectlMCPServer(ctx context.Context, kubectlConfig string, tools tools.
 		),
 		tools:         tools,
 		mcpServerMode: serverMode,
-		sseEndpoint:   sseEndpoint,
+		httpPort:      httpPort,
 	}
 
 	// Add built-in tools
@@ -95,15 +95,8 @@ func newKubectlMCPServer(ctx context.Context, kubectlConfig string, tools tools.
 			klog.V(2).Infof("Processing tools from MCP server %s: %d tools found", serverName, len(tools))
 
 			for _, tool := range tools {
-				// Create unique tool name to avoid conflicts between servers
-				uniqueToolName := tool.Name
-				if tool.Server != "" {
-					// If tool already has server info, use it as-is
-					uniqueToolName = tool.Name
-				} else {
-					// Add server prefix to avoid name conflicts
-					uniqueToolName = fmt.Sprintf("%s_%s", serverName, tool.Name)
-				}
+				// Create unique tool name to avoid conflicts with built-in tools or from other servers
+				uniqueToolName := fmt.Sprintf("%s_%s", serverName, tool.Name)
 
 				// Use the actual tool schema instead of creating a generic wrapper
 				var schema *gollm.FunctionDefinition
@@ -170,16 +163,24 @@ func (s *kubectlMCPServer) Serve(ctx context.Context) error {
 
 	klog.Info("Starting kubectl-ai MCP server")
 
-	if s.mcpServerMode == "sse" {
+	switch s.mcpServerMode {
+	case "sse":
 		// Start the server in SSE mode
-		klog.Infof("Starting MCP server in SSE mode on endpoint %d", s.sseEndpoint)
+		klog.Infof("Starting MCP server in SSE mode on port %d", s.httpPort)
 		sseServer := server.NewSSEServer(s.server)
-		endpoint := fmt.Sprintf(":%d", s.sseEndpoint)
-		klog.Infof("Listening for SSE connections on port %d", s.sseEndpoint)
+		endpoint := fmt.Sprintf(":%d", s.httpPort)
+		klog.Infof("Listening for SSE connections on port %d", s.httpPort)
 		return sseServer.Start(endpoint)
+	case "streamable-http":
+		// Start the server in streamable HTTP mode
+		klog.Infof("Starting MCP server in streamable HTTP mode on port %d", s.httpPort)
+		httpServer := server.NewStreamableHTTPServer(s.server)
+		endpoint := fmt.Sprintf(":%d", s.httpPort)
+		klog.Infof("Listening for streamable HTTP connections on port %d", s.httpPort)
+		return httpServer.Start(endpoint)
+	default:
+		return server.ServeStdio(s.server)
 	}
-
-	return server.ServeStdio(s.server)
 }
 
 func (s *kubectlMCPServer) handleToolCall(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -285,14 +286,8 @@ func (s *kubectlMCPServer) handleExternalMCPToolCall(ctx context.Context, reques
 	// Look for the tool by checking both original name and server-prefixed name
 	for serverName, tools := range serverTools {
 		for _, tool := range tools {
-			// Check if this matches the requested tool (either direct name or server-prefixed name)
-			uniqueToolName := tool.Name
-			if tool.Server == "" {
-				// Add server prefix to match what was registered
-				uniqueToolName = fmt.Sprintf("%s_%s", serverName, tool.Name)
-			}
-
-			if uniqueToolName == toolName || tool.Name == toolName {
+			uniqueToolName := fmt.Sprintf("%s_%s", serverName, tool.Name)
+			if uniqueToolName == toolName {
 				targetServerName = serverName
 				originalToolName = tool.Name // Use the original tool name for the MCP call
 				break

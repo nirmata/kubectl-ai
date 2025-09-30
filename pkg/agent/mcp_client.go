@@ -42,8 +42,14 @@ func (a *Agent) InitializeMCPClient(ctx context.Context) error {
 			return err
 		}
 
-		// Create and register MCP tool wrapper
+		// Create an MCPTool wrapper first to get the unique name
 		mcpTool := tools.NewMCPTool(serverName, toolInfo.Name, toolInfo.Description, schema, manager)
+
+		// Update schema with unique name and better description to avoid conflicts
+		schema.Name = mcpTool.UniqueToolName()
+		schema.Description = fmt.Sprintf("%s (from %s)", toolInfo.Description, serverName)
+
+		// Create and register MCP tool wrapper
 		tools.RegisterTool(mcpTool)
 		return nil
 	})

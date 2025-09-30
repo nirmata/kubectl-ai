@@ -76,6 +76,7 @@ type Agent struct {
 	// to be combined with PromptTemplateFile
 	ExtraPromptPaths []string
 	Model            string
+	Provider         string
 
 	RemoveWorkDir bool
 
@@ -200,13 +201,7 @@ func (s *Agent) Init(ctx context.Context) error {
 	}
 
 	if session, ok := s.ChatMessageStore.(*sessions.Session); ok {
-		metadata, err := session.LoadMetadata()
-		if err != nil {
-			return fmt.Errorf("failed to load session metadata: %w", err)
-		}
-		s.session.ID = session.ID
-		s.session.CreatedAt = metadata.CreatedAt
-		s.session.LastModified = metadata.LastAccessed
+		s.loadSession(session.ID)
 	} else {
 		s.session.ID = uuid.New().String()
 		s.session.CreatedAt = time.Now()
@@ -355,6 +350,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 					if userInput == io.EOF {
 						log.Info("Agent loop done, EOF received")
 						c.setAgentState(api.AgentStateExited)
+						c.addMessage(api.MessageSourceAgent, api.MessageTypeText, "It has been a pleasure assisting you. Have a great day!")
 						return
 					}
 					query, ok := userInput.(*api.UserInputResponse)
@@ -413,6 +409,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 					if userInput == io.EOF {
 						log.Info("Agent loop done, EOF received")
 						c.setAgentState(api.AgentStateExited)
+						c.addMessage(api.MessageSourceAgent, api.MessageTypeText, "It has been a pleasure assisting you. Have a great day!")
 						return
 					}
 					choiceResponse, ok := userInput.(*api.UserChoiceResponse)
@@ -558,6 +555,13 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 					c.currIteration = 0
 					c.pendingFunctionCalls = []ToolCallAnalysis{}
 					log.Info("Agent task completed, transitioning to done state")
+					if streamedText == "" {
+						// If no tool calls to be made and we do not have a response from the LLM
+						// we should let the user know for better diagnostics.
+						// IMPORTANT: This also prevents UIs from getting blocked on reading from the output channel.
+						log.Info("Empty response with no tool calls from LLM.")
+						c.addMessage(api.MessageSourceAgent, api.MessageTypeText, "Empty response from LLM")
+					}
 					continue
 				}
 
@@ -702,6 +706,13 @@ func (c *Agent) handleMetaQuery(ctx context.Context, query string) (answer strin
 		}
 		return "Session not found (session persistence not enabled)", true, nil
 
+	case "save-session":
+		savedSessionID, err := c.SaveSession()
+		if err != nil {
+			return "", false, fmt.Errorf("failed to save session: %w", err)
+		}
+		return "Saved session as " + savedSessionID, true, nil
+
 	case "sessions":
 		manager, err := sessions.NewSessionManager()
 		if err != nil {
@@ -741,7 +752,108 @@ func (c *Agent) handleMetaQuery(ctx context.Context, query string) (answer strin
 		return availableSessions, true, nil
 	}
 
+	if strings.HasPrefix(query, "resume-session") {
+		parts := strings.Split(query, " ")
+		if len(parts) != 2 {
+			return "Invalid command. Usage: resume-session <session_id>", true, nil
+		}
+		sessionID := parts[1]
+		if err := c.loadSession(sessionID); err != nil {
+			return "", false, err
+		}
+		return fmt.Sprintf("Resumed session %s.", sessionID), true, nil
+	}
+
 	return "", false, nil
+}
+
+func (c *Agent) SaveSession() (string, error) {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+
+	manager, err := sessions.NewSessionManager()
+	if err != nil {
+		return "", fmt.Errorf("failed to create session manager: %w", err)
+	}
+	foundSession, _ := manager.FindSessionByID(c.session.ID)
+	if foundSession != nil {
+		return foundSession.ID, nil
+	}
+	metadata := sessions.Metadata{
+		CreatedAt:    c.session.CreatedAt,
+		LastAccessed: time.Now(),
+		ModelID:      c.Model,
+		ProviderID:   c.Provider,
+	}
+	newSession, err := manager.NewSession(metadata)
+	if err != nil {
+		return "", fmt.Errorf("failed to create new session: %w", err)
+	}
+
+	messages := c.ChatMessageStore.ChatMessages()
+	if err := newSession.SetChatMessages(messages); err != nil {
+		return "", fmt.Errorf("failed to save chat messages to new session: %w", err)
+	}
+
+	c.ChatMessageStore = newSession
+	c.session.ChatMessageStore = newSession
+	c.llmChat.Initialize(c.ChatMessageStore.ChatMessages())
+
+	return newSession.ID, nil
+}
+
+// loadSession loads a session by ID (or latest), updates the agent's state, and re-initializes the chat.
+func (c *Agent) loadSession(sessionID string) error {
+	manager, err := sessions.NewSessionManager()
+	if err != nil {
+		return fmt.Errorf("failed to create session manager: %w", err)
+	}
+
+	var session *sessions.Session
+	if sessionID == "" || sessionID == "latest" {
+		s, err := manager.GetLatestSession()
+		if err != nil {
+			return fmt.Errorf("failed to get latest session: %w", err)
+		}
+		if s == nil {
+			// This can happen if GetLatestSession returns nil, nil (no sessions exist)
+			return fmt.Errorf("no sessions found to resume")
+		}
+		session = s
+	} else {
+		s, err := manager.FindSessionByID(sessionID)
+		if err != nil {
+			return fmt.Errorf("failed to get session %q: %w", sessionID, err)
+		}
+		session = s
+	}
+
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+
+	c.ChatMessageStore = session
+	c.session.ChatMessageStore = session
+	c.session.Messages = session.ChatMessages()
+	metadata, err := session.LoadMetadata()
+	if err != nil {
+		return fmt.Errorf("failed to load session metadata: %w", err)
+	}
+	c.session.ID = session.ID
+	c.session.CreatedAt = metadata.CreatedAt
+	now := time.Now()
+	c.session.LastModified = now
+	metadata.LastAccessed = now
+	if err := session.SaveMetadata(metadata); err != nil {
+		return fmt.Errorf("failed to update session metadata: %w", err)
+	}
+
+	if c.llmChat != nil {
+		if err := c.llmChat.Initialize(c.session.ChatMessageStore.ChatMessages()); err != nil {
+			return fmt.Errorf("failed to re-initialize chat with new session: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func (c *Agent) listModels(ctx context.Context) ([]string, error) {
@@ -833,13 +945,7 @@ func (c *Agent) analyzeToolCalls(ctx context.Context, toolCalls []gollm.Function
 		if err != nil {
 			toolCallAnalysis[i].IsInteractiveError = err
 		}
-		modifiesResourceStr := toolCall.GetTool().CheckModifiesResource(call.Arguments)
-		if modifiesResourceStr == "unknown" {
-			if llmModifies, ok := call.Arguments["modifies_resource"].(string); ok {
-				modifiesResourceStr = llmModifies
-			}
-		}
-		toolCallAnalysis[i].ModifiesResourceStr = modifiesResourceStr
+		toolCallAnalysis[i].ModifiesResourceStr = toolCall.GetTool().CheckModifiesResource(call.Arguments)
 		toolCallAnalysis[i].ParsedToolCall = toolCall
 	}
 	return toolCallAnalysis, nil
