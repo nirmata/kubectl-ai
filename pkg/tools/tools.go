@@ -28,7 +28,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
 	"github.com/google/uuid"
-	"k8s.io/klog/v2"
 	"sigs.k8s.io/yaml"
 )
 
@@ -152,9 +151,6 @@ type InvokeToolOptions struct {
 
 	// Kubeconfig is the path to the kubeconfig file.
 	Kubeconfig string
-
-	// CallID is the ID to use for this tool call. If empty, a new UUID will be generated.
-	CallID string
 }
 
 type ToolRequestEvent struct {
@@ -173,15 +169,7 @@ type ToolResponseEvent struct {
 func (t *ToolCall) InvokeTool(ctx context.Context, opt InvokeToolOptions) (any, error) {
 	recorder := journal.RecorderFromContext(ctx)
 
-	// Use provided CallID or generate a new one
-	callID := opt.CallID
-	if callID == "" {
-		callID = uuid.NewString()
-		klog.V(2).Infof("Generated new callID: %s", callID)
-	} else {
-		klog.V(2).Infof("Using provided callID: %s", callID)
-	}
-
+	callID := uuid.NewString()
 	recorder.Write(ctx, &journal.Event{
 		Timestamp: time.Now(),
 		Action:    "tool-request",

@@ -678,7 +678,7 @@ func (c *bedrockChat) processContents(contents []any, contentBlocks *[]types.Con
 						Value: document.NewLazyDocument(v.Result),
 					},
 				},
-				Status: status, // only supoprted for Anthropic Claude 3 models???
+				Status: status,
 			}
 			*contentBlocks = append(*contentBlocks, &types.ContentBlockMemberToolResult{Value: toolResult})
 		case []interface{}:
