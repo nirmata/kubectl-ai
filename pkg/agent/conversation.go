@@ -220,6 +220,8 @@ func (s *Agent) Init(ctx context.Context) error {
 	systemPrompt, err := s.generatePrompt(ctx, defaultSystemPromptTemplate, PromptData{
 		Tools:             s.Tools,
 		EnableToolUseShim: s.EnableToolUseShim,
+		// RunOnce is a good proxy to indicate the agentic session is non-interactive mode.
+		SessionIsInteractive: !s.RunOnce,
 	})
 	if err != nil {
 		return fmt.Errorf("generating system prompt: %w", err)
@@ -288,6 +290,10 @@ func (c *Agent) Close() error {
 
 func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 	log := klog.FromContext(ctx)
+
+	if c.Recorder != nil {
+		ctx = journal.ContextWithRecorder(ctx, c.Recorder)
+	}
 
 	log.Info("Starting agent loop", "initialQuery", initialQuery, "runOnce", c.RunOnce)
 	go func() {
@@ -1025,7 +1031,8 @@ type PromptData struct {
 	Query string
 	Tools tools.Tools
 
-	EnableToolUseShim bool
+	EnableToolUseShim    bool
+	SessionIsInteractive bool
 }
 
 func (a *PromptData) ToolsAsJSON() string {
