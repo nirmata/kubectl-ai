@@ -53,9 +53,27 @@ func NewSessionManager() (*SessionManager, error) {
 // NewSession creates a new session.
 func (sm *SessionManager) NewSession(meta Metadata) (*Session, error) {
 	// Generate a unique session ID with date prefix and random suffix
-	suffix := fmt.Sprintf("%04d", rand.Intn(1000))
-	sessionID := time.Now().Format(timeFormat) + "-" + suffix
-	sessionPath := filepath.Join(sm.BasePath, sessionID)
+	// Keep trying until we find a unique ID
+	var sessionID string
+	var sessionPath string
+	maxAttempts := 100 // Prevent infinite loop
+
+	for i := 0; i < maxAttempts; i++ {
+		suffix := fmt.Sprintf("%04d", rand.Intn(1000))
+		candidateID := time.Now().Format(timeFormat) + "-" + suffix
+		candidatePath := filepath.Join(sm.BasePath, candidateID)
+
+		// Check if this session ID already exists
+		if _, err := os.Stat(candidatePath); os.IsNotExist(err) {
+			sessionID = candidateID
+			sessionPath = candidatePath
+			break
+		}
+	}
+
+	if sessionID == "" {
+		return nil, fmt.Errorf("failed to generate unique session ID after %d attempts", maxAttempts)
+	}
 
 	if err := os.MkdirAll(sessionPath, 0755); err != nil {
 		return nil, err
