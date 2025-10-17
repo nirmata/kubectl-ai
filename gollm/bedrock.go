@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/api"
+	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/compression"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
@@ -98,12 +99,44 @@ func (c *BedrockClient) StartChat(systemPrompt, model string) Chat {
 		enhancedPrompt += "Note the comma after the \"thought\" field! Malformed JSON will cause failures."
 	}
 
-	return &bedrockChat{
+	chat := &bedrockChat{
 		client:       c,
 		systemPrompt: enhancedPrompt,
 		model:        selectedModel,
 		messages:     []types.Message{},
 	}
+
+	// Create compression service for real-time compression
+	summaryGenerator := func(ctx context.Context, messages []*api.Message) (string, error) {
+		// Convert messages to a format suitable for the LLM
+		conversationText := compression.ConvertMessagesToText(messages)
+
+		// Get the summarization prompt
+		userPrompt := compression.GetSummarizationPrompt(conversationText)
+
+		// Create a new chat session for summarization
+		chat := c.StartChat("", selectedModel)
+
+		// Send the summarization request
+		response, err := chat.Send(ctx, userPrompt)
+		if err != nil {
+			return "", fmt.Errorf("failed to send summarization request: %w", err)
+		}
+
+		// Extract the summary text from the response
+		candidates := response.Candidates()
+		if len(candidates) == 0 {
+			return "", fmt.Errorf("no candidates in response")
+		}
+
+		summary := candidates[0].String()
+		klog.V(2).Infof("Generated summary: %d characters", len(summary))
+		return summary, nil
+	}
+
+	chat.compressionService = compression.NewCompressionService(summaryGenerator)
+
+	return chat
 }
 
 // GenerateCompletion generates a single completion for the given request
@@ -135,15 +168,17 @@ func (c *BedrockClient) ListModels(ctx context.Context) ([]string, error) {
 
 // bedrockChat implements the Chat interface for Bedrock conversations
 type bedrockChat struct {
-	client       *BedrockClient
-	systemPrompt string
-	model        string
-	messages     []types.Message
-	toolConfig   *types.ToolConfiguration
-	functionDefs []*FunctionDefinition
+	client             *BedrockClient
+	systemPrompt       string
+	model              string
+	messages           []types.Message
+	toolConfig         *types.ToolConfiguration
+	functionDefs       []*FunctionDefinition
+	compressionService *compression.CompressionService
 }
 
 func (cs *bedrockChat) Initialize(history []*api.Message) error {
+	// Note: Compression is now handled by the session layer before Initialize is called
 	cs.messages = make([]types.Message, 0, len(history))
 
 	for i, msg := range history {
@@ -184,6 +219,14 @@ func (cs *bedrockChat) Initialize(history []*api.Message) error {
 		cs.messages = append(cs.messages, bedrockMsg)
 	}
 
+	return nil
+}
+
+// checkAndCompressInternalHistory is disabled - compression should only happen at session level
+// to avoid breaking conversation flow during active conversations
+func (c *bedrockChat) checkAndCompressInternalHistory(ctx context.Context) error {
+	// Provider-level compression is disabled to prevent breaking conversation flow
+	// Compression is handled at the session level before messages reach the provider
 	return nil
 }
 
@@ -437,6 +480,12 @@ func (c *bedrockChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 		}
 	}
 
+	// Check if compression is needed for internal history
+	if err := c.checkAndCompressInternalHistory(ctx); err != nil {
+		klog.Warningf("Internal history compression failed: %v", err)
+		// Continue without compression - don't break the conversation
+	}
+
 	return response, nil
 }
 
@@ -639,6 +688,12 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		// Only add to history if there's content or tools
 		if len(assistantMessage.Content) > 0 {
 			c.messages = append(c.messages, assistantMessage)
+		}
+
+		// Check if compression is needed for internal history
+		if err := c.checkAndCompressInternalHistory(ctx); err != nil {
+			klog.Warningf("Internal history compression failed: %v", err)
+			// Continue without compression - don't break the conversation
 		}
 	}, nil
 }
@@ -1044,4 +1099,142 @@ func (r *bedrockCompletionResponse) UsageMetadata() any {
 		return nil
 	}
 	return r.chatResponse.UsageMetadata()
+}
+
+// convertBedrockHistoryToAPIMessages converts types.Message history to api.Message format
+func (c *bedrockChat) convertBedrockHistoryToAPIMessages(history []types.Message) []*api.Message {
+	var apiMessages []*api.Message
+
+	for i, msg := range history {
+		// Determine source based on role
+		var source api.MessageSource
+		switch msg.Role {
+		case types.ConversationRoleUser:
+			source = api.MessageSourceUser
+		case types.ConversationRoleAssistant:
+			source = api.MessageSourceAgent
+		default:
+			source = api.MessageSourceAgent
+		}
+
+		// Determine message type and payload
+		var msgType api.MessageType
+		var payload interface{}
+
+		// Check for tool use blocks
+		hasToolUse := false
+		for _, block := range msg.Content {
+			if _, ok := block.(*types.ContentBlockMemberToolUse); ok {
+				hasToolUse = true
+				break
+			}
+		}
+
+		if hasToolUse {
+			// Tool call request
+			msgType = api.MessageTypeToolCallRequest
+			toolCallData := make(map[string]interface{})
+			for _, block := range msg.Content {
+				if toolUse, ok := block.(*types.ContentBlockMemberToolUse); ok {
+					toolID := ""
+					if toolUse.Value.ToolUseId != nil {
+						toolID = *toolUse.Value.ToolUseId
+					}
+					toolCallData[toolID] = map[string]interface{}{
+						"name":      toolUse.Value.Name,
+						"arguments": toolUse.Value.Input,
+					}
+				}
+			}
+			payload = toolCallData
+		} else {
+			// Text message
+			msgType = api.MessageTypeText
+			textContent := ""
+			for _, block := range msg.Content {
+				if text, ok := block.(*types.ContentBlockMemberText); ok {
+					textContent += text.Value
+				}
+			}
+			payload = textContent
+		}
+
+		if payload == "" || payload == nil {
+			// Skip empty messages
+			continue
+		}
+
+		apiMsg := &api.Message{
+			ID:        fmt.Sprintf("bedrock_%d", i),
+			Source:    source,
+			Type:      msgType,
+			Payload:   payload,
+			Timestamp: time.Now(),
+		}
+
+		apiMessages = append(apiMessages, apiMsg)
+	}
+
+	return apiMessages
+}
+
+// convertAPIMessagesToBedrockHistory converts api.Message history back to types.Message format
+func (c *bedrockChat) convertAPIMessagesToBedrockHistory(apiMessages []*api.Message) ([]types.Message, error) {
+	var bedrockHistory []types.Message
+
+	for _, apiMsg := range apiMessages {
+		// Determine role based on source
+		var role types.ConversationRole
+		switch apiMsg.Source {
+		case api.MessageSourceUser:
+			role = types.ConversationRoleUser
+		case api.MessageSourceModel, api.MessageSourceAgent:
+			role = types.ConversationRoleAssistant
+		default:
+			role = types.ConversationRoleAssistant
+		}
+
+		var contentBlocks []types.ContentBlock
+
+		// Process based on message type
+		switch apiMsg.Type {
+		case api.MessageTypeText:
+			if textPayload, ok := apiMsg.Payload.(string); ok {
+				contentBlocks = append(contentBlocks, &types.ContentBlockMemberText{Value: textPayload})
+			}
+
+		case api.MessageTypeToolCallRequest:
+			if toolCallData, ok := apiMsg.Payload.(map[string]interface{}); ok {
+				for id, data := range toolCallData {
+					if toolData, ok := data.(map[string]interface{}); ok {
+						// Create a simple tool use block
+						toolUse := types.ToolUseBlock{
+							ToolUseId: aws.String(id),
+							Name:      aws.String(toolData["name"].(string)),
+							Input:     document.NewLazyDocument(toolData["arguments"]),
+						}
+						contentBlocks = append(contentBlocks, &types.ContentBlockMemberToolUse{Value: toolUse})
+					}
+				}
+			}
+
+		default:
+			// Skip unsupported message types
+			continue
+		}
+
+		if len(contentBlocks) == 0 {
+			// Skip empty messages
+			continue
+		}
+
+		bedrockMsg := types.Message{
+			Role:    role,
+			Content: contentBlocks,
+		}
+
+		bedrockHistory = append(bedrockHistory, bedrockMsg)
+	}
+
+	return bedrockHistory, nil
 }
