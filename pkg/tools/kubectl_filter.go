@@ -74,9 +74,16 @@ func kubectlModifiesResource(command string) string {
 	numCmds := 0
 
 	// Single pass through all command calls
+	var foundDestructive bool
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if call, ok := node.(*syntax.CallExpr); ok {
 			result := analyzeCall(call)
+
+			// If we find any destructive operation, mark it and stop
+			if result == "destructive" {
+				foundDestructive = true
+				return false // Stop walking
+			}
 
 			// If we find any write operation, mark it and stop
 			if result == "yes" {
@@ -95,6 +102,12 @@ func kubectlModifiesResource(command string) string {
 		}
 		return true
 	})
+
+	// Return destructive first
+	if foundDestructive {
+		klog.Infof("KubectlModifiesResource result: destructive for command: %q", command)
+		return "destructive"
+	}
 
 	if numCmds > 1 {
 		// if it's a composite bash command, we should err on the side of caution and return unknown
@@ -178,6 +191,12 @@ func analyzeCall(call *syntax.CallExpr) string {
 	if verb == "" {
 		klog.Warningf("analyzeCall: no verb found after kubectl in args: %v", args)
 		return "unknown"
+	}
+
+	// Check destructive operations first - these always require explicit confirmation
+	if verb == "delete" && !hasDryRun {
+		klog.V(1).Infof("analyzeCall: destructive op for verb=%q subVerb=%q", verb, subVerb)
+		return "destructive"
 	}
 
 	// Check standard operations - write operations first (prioritize immediate detection)

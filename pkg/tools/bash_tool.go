@@ -308,7 +308,7 @@ func (t *BashTool) IsInteractive(args map[string]any) (bool, error) {
 
 // CheckModifiesResource determines if the command modifies kubernetes resources
 // This is used for permission checks before command execution
-// Returns "yes", "no", or "unknown"
+// Returns "yes", "no", "destructive", or "unknown"
 func (t *BashTool) CheckModifiesResource(args map[string]any) string {
 	command, ok := args["command"].(string)
 	if !ok {
@@ -317,6 +317,24 @@ func (t *BashTool) CheckModifiesResource(args map[string]any) string {
 
 	if strings.Contains(command, "kubectl") {
 		return kubectlModifiesResource(command)
+	}
+
+	// Detect destructive bash operations
+	commandLower := strings.ToLower(command)
+
+	// Check for file/directory deletion commands
+	if strings.Contains(commandLower, " rm ") || strings.HasPrefix(strings.TrimSpace(commandLower), "rm ") {
+		// Check if it's recursive deletion (more dangerous)
+		if strings.Contains(commandLower, " -r") || strings.Contains(commandLower, " -rf") {
+			klog.V(2).Infof("bash destructiveness: detected rm with -r flag (recursive deletion)")
+			return "destructive"
+		}
+		klog.V(2).Infof("bash destructiveness: detected rm (file deletion)")
+		return "destructive"
+	}
+	if strings.Contains(commandLower, "rmdir ") {
+		klog.V(2).Infof("bash destructiveness: detected rmdir")
+		return "destructive"
 	}
 
 	return "unknown"
