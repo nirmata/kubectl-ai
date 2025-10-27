@@ -250,7 +250,7 @@ func (m *Manager) RefreshToolDiscovery(ctx context.Context) (map[string][]Tool, 
 	}
 
 	if toolCount > 0 {
-		klog.InfoS("Successfully discovered MCP tools", "totalTools", toolCount)
+		klog.V(1).InfoS("Successfully discovered MCP tools", "totalTools", toolCount)
 	} else {
 		klog.V(1).Info("No MCP tools were discovered from connected servers")
 	}
@@ -280,7 +280,7 @@ func (m *Manager) RegisterTools(ctx context.Context, registerCallback func(serve
 	}
 
 	if toolCount > 0 {
-		klog.InfoS("Registered MCP tools", "totalTools", toolCount)
+		klog.V(2).InfoS("Registered MCP tools", "totalTools", toolCount)
 	}
 
 	return nil
