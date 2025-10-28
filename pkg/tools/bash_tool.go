@@ -68,7 +68,7 @@ func expandShellVar(value string) (string, error) {
 // It extracts file paths from redirection operators (>, >>, 2>, 2>>, >|, <, <<) and pipe targets.
 func validateShellCommandPaths(command, workDir string, allowedDirs []string) error {
 	if len(allowedDirs) == 0 {
-		return nil // No restrictions if no allowed directories specified
+		return nil
 	}
 
 	// Normalize allowed directories to absolute paths
@@ -87,7 +87,6 @@ func validateShellCommandPaths(command, workDir string, allowedDirs []string) er
 		regexp.MustCompile(`(?:^|\s)(?:2>>|2>|>>|>|>|)\s*([^\s&\|;]+)`),
 		// Input redirection: < file
 		regexp.MustCompile(`(?:^|\s)<\s+([^\s&\|;]+)`),
-		// Heredoc: << tag (more complex, skip for now)
 		// Pipe to tee or redirect: | tee file, | > file, | >> file
 		regexp.MustCompile(`\|\s*(?:tee\s+)?([^\s&\|;]+)`),
 	}
