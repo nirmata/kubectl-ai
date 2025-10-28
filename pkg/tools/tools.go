@@ -34,8 +34,9 @@ import (
 type ContextKey string
 
 const (
-	KubeconfigKey ContextKey = "kubeconfig"
-	WorkDirKey    ContextKey = "work_dir"
+	KubeconfigKey  ContextKey = "kubeconfig"
+	WorkDirKey     ContextKey = "work_dir"
+	AllowedDirsKey ContextKey = "allowed_dirs"
 )
 
 func Lookup(name string) Tool {
@@ -151,6 +152,9 @@ type InvokeToolOptions struct {
 
 	// Kubeconfig is the path to the kubeconfig file.
 	Kubeconfig string
+
+	// AllowedDirs is a list of directories that are allowed for file operations.
+	AllowedDirs []string
 }
 
 type ToolRequestEvent struct {
@@ -182,6 +186,9 @@ func (t *ToolCall) InvokeTool(ctx context.Context, opt InvokeToolOptions) (any, 
 
 	ctx = context.WithValue(ctx, KubeconfigKey, opt.Kubeconfig)
 	ctx = context.WithValue(ctx, WorkDirKey, opt.WorkDir)
+	if opt.AllowedDirs != nil {
+		ctx = context.WithValue(ctx, AllowedDirsKey, opt.AllowedDirs)
+	}
 
 	response, err := t.tool.Run(ctx, t.arguments)
 

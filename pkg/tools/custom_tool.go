@@ -138,6 +138,18 @@ func (t *CustomTool) Run(ctx context.Context, args map[string]any) (any, error) 
 
 	workDir := ctx.Value(WorkDirKey).(string)
 
+	// Validate file paths in shell commands against allowed directories
+	if allowedDirsValue := ctx.Value(AllowedDirsKey); allowedDirsValue != nil {
+		if allowedDirs, ok := allowedDirsValue.([]string); ok && len(allowedDirs) > 0 {
+			if err := validateShellCommandPaths(command, workDir, allowedDirs); err != nil {
+				return &ExecResult{
+					Command: command,
+					Error:   err.Error(),
+				}, nil
+			}
+		}
+	}
+
 	cmd := exec.CommandContext(ctx, lookupBashBin(), "-c", command)
 	cmd.Dir = workDir
 	cmd.Env = os.Environ()
