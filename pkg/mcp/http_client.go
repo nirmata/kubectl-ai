@@ -16,8 +16,10 @@ package mcp
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"time"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
@@ -38,6 +40,8 @@ type httpClient struct {
 	oauthConfig  *OAuthConfig
 	timeout      int
 	useStreaming bool
+	skipVerify   bool
+	headers      map[string]string
 	client       *mcpclient.Client
 }
 
@@ -50,6 +54,8 @@ func NewHTTPClient(config ClientConfig) MCPClient {
 		oauthConfig:  config.OAuthConfig,
 		timeout:      config.Timeout,
 		useStreaming: config.UseStreaming,
+		skipVerify:   config.SkipVerify,
+		headers:      config.Headers,
 	}
 }
 
@@ -114,16 +120,45 @@ func (c *httpClient) createStreamingClient() (*mcpclient.Client, error) {
 	// Set up options for the HTTP client
 	var options []transport.StreamableHTTPCOption
 
-	// Add timeout if specified
+	// Add timeout if specified (only when not using custom client)
 	if c.timeout > 0 {
 		options = append(options, transport.WithHTTPTimeout(time.Duration(c.timeout)*time.Second))
 	}
 
-	// Add authentication if specified
-	if c.auth != nil {
-		// Prepare headers map for authentication
-		headers := make(map[string]string)
+	klog.V(2).InfoS("WARNING: TLS certificate verification is disabled", "server", c.name)
+	// Handle TLS verification skip by creating custom HTTP client
+	if c.skipVerify {
+		klog.V(2).InfoS("WARNING: TLS certificate verification is disabled", "server", c.name)
 
+		// Create custom HTTP client with TLS verification disabled
+		customClient := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
+			},
+		}
+
+		// Add timeout to custom client if specified
+		if c.timeout > 0 {
+			customClient.Timeout = time.Duration(c.timeout) * time.Second
+		}
+
+		// Use the custom HTTP client
+		options = append(options, transport.WithHTTPBasicClient(customClient))
+	}
+
+	// Prepare headers map for authentication and custom headers
+	headers := make(map[string]string)
+
+	// Add custom headers from configuration first
+	for key, value := range c.headers {
+		headers[key] = value
+		klog.V(3).InfoS("Using custom header for HTTP client", "server", c.name, "header", key)
+	}
+
+	// Add authentication headers if specified (may override custom headers)
+	if c.auth != nil {
 		switch c.auth.Type {
 		case "basic":
 			auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(c.auth.Username+":"+c.auth.Password))
@@ -140,11 +175,11 @@ func (c *httpClient) createStreamingClient() (*mcpclient.Client, error) {
 			headers[headerName] = c.auth.ApiKey
 			klog.V(3).InfoS("Using API key auth for HTTP client", "server", c.name)
 		}
+	}
 
-		// Add headers if any were set
-		if len(headers) > 0 {
-			options = append(options, transport.WithHTTPHeaders(headers))
-		}
+	// Add headers if any were set
+	if len(headers) > 0 {
+		options = append(options, transport.WithHTTPHeaders(headers))
 	}
 
 	klog.V(4).InfoS("Creating streamable HTTP client", "server", c.name, "url", c.url)
@@ -185,7 +220,7 @@ func (c *httpClient) createOAuthClient(ctx context.Context) (*mcpclient.Client, 
 	}
 
 	// Add OAuth configuration
-	options = append(options, transport.WithOAuth(oauthCfg))
+	options = append(options, transport.WithHTTPOAuth(oauthCfg))
 
 	// Add timeout if specified
 	if c.timeout > 0 {
