@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -61,6 +62,91 @@ func expandShellVar(value string) (string, error) {
 		}
 	}
 	return os.ExpandEnv(value), nil
+}
+
+// validateShellCommandPaths validates that all file paths in a shell command are within allowed directories.
+// It extracts file paths from redirection operators (>, >>, 2>, 2>>, >|, <, <<) and pipe targets.
+func validateShellCommandPaths(command, workDir string, allowedDirs []string) error {
+	if len(allowedDirs) == 0 {
+		return nil // No restrictions if no allowed directories specified
+	}
+
+	// Normalize allowed directories to absolute paths
+	normalizedAllowedDirs := make([]string, 0, len(allowedDirs))
+	for _, dir := range allowedDirs {
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
+		normalizedAllowedDirs = append(normalizedAllowedDirs, absDir)
+	}
+
+	// Extract file paths from redirection operators and pipes
+	filePathPatterns := []*regexp.Regexp{
+		// Redirection operators: > file, >> file, 2> file, 2>> file, >| file
+		regexp.MustCompile(`(?:^|\s)(?:2>>|2>|>>|>|>|)\s*([^\s&\|;]+)`),
+		// Input redirection: < file
+		regexp.MustCompile(`(?:^|\s)<\s+([^\s&\|;]+)`),
+		// Heredoc: << tag (more complex, skip for now)
+		// Pipe to tee or redirect: | tee file, | > file, | >> file
+		regexp.MustCompile(`\|\s*(?:tee\s+)?([^\s&\|;]+)`),
+	}
+
+	extractedPaths := make(map[string]bool)
+
+	// Extract paths from different patterns
+	for _, pattern := range filePathPatterns {
+		matches := pattern.FindAllStringSubmatch(command, -1)
+		for _, match := range matches {
+			if len(match) > 1 && match[1] != "" {
+				path := strings.Trim(match[1], `"'`)
+				// Skip empty paths and common command arguments
+				if path != "" && !strings.HasPrefix(path, "-") && !strings.HasPrefix(path, "--") {
+					extractedPaths[path] = true
+				}
+			}
+		}
+	}
+
+	// Validate each extracted path
+	for rawPath := range extractedPaths {
+		// Expand variables in path
+		expandedPath, err := expandShellVar(rawPath)
+		if err != nil {
+			return fmt.Errorf("failed to expand path %q: %w", rawPath, err)
+		}
+
+		// Resolve to absolute path
+		var absPath string
+		if filepath.IsAbs(expandedPath) {
+			absPath = expandedPath
+		} else {
+			absPath = filepath.Join(workDir, expandedPath)
+		}
+		absPath, err = filepath.Abs(absPath)
+		if err != nil {
+			return fmt.Errorf("failed to resolve absolute path for %q: %w", expandedPath, err)
+		}
+
+		// Normalize the path (clean up .. and .)
+		absPath = filepath.Clean(absPath)
+
+		// Check if path is within any allowed directory
+		allowed := false
+		for _, allowedDir := range normalizedAllowedDirs {
+			relPath, err := filepath.Rel(allowedDir, absPath)
+			if err == nil && !strings.HasPrefix(relPath, "..") {
+				allowed = true
+				break
+			}
+		}
+
+		if !allowed {
+			return fmt.Errorf("access denied: path %q is outside allowed directories", absPath)
+		}
+	}
+
+	return nil
 }
 
 type BashTool struct{}
@@ -108,6 +194,18 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (any, error) {
 	}
 	if strings.Contains(command, "kubectl port-forward") {
 		return &ExecResult{Command: command, Error: "port-forwarding is not allowed because assistant is running in an unattended mode, please try some other alternative"}, nil
+	}
+
+	// Validate file paths in shell commands against allowed directories
+	if allowedDirsValue := ctx.Value(AllowedDirsKey); allowedDirsValue != nil {
+		if allowedDirs, ok := allowedDirsValue.([]string); ok && len(allowedDirs) > 0 {
+			if err := validateShellCommandPaths(command, workDir, allowedDirs); err != nil {
+				return &ExecResult{
+					Command: command,
+					Error:   err.Error(),
+				}, nil
+			}
+		}
 	}
 
 	var cmd *exec.Cmd
