@@ -419,6 +419,15 @@ func (t *BashTool) CheckModifiesResource(args map[string]any) string {
 	// Detect destructive bash operations
 	commandLower := strings.ToLower(command)
 
+	// Check for helm mutation commands (cluster-affecting, considered destructive)
+	helmMutations := []string{"helm install", "helm upgrade", "helm uninstall"}
+	for _, mutation := range helmMutations {
+		if strings.Contains(commandLower, mutation) {
+			klog.V(2).Infof("bash destructiveness: detected helm mutation command: %s", mutation)
+			return "yes"
+		}
+	}
+
 	// Check for file/directory deletion commands
 	if strings.Contains(commandLower, " rm ") || strings.HasPrefix(strings.TrimSpace(commandLower), "rm ") {
 		// Check if it's recursive deletion (more dangerous)
