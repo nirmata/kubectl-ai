@@ -31,12 +31,29 @@ const (
 	historyFileName  = "history.json"
 )
 
+// TodoItem represents a single todo item
+type TodoItem struct {
+	ID          string    `json:"id"`
+	Description string    `json:"description"`
+	Status      string    `json:"status"` // "pending", "in_progress", "completed"
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// GetSessionKeyType is the context key type for the get_session callback
+// This is defined in the sessions package so it can be shared across packages
+type GetSessionKeyType struct{}
+
+// GetSessionKey is the context key for accessing the get_session callback
+var GetSessionKey = GetSessionKeyType{}
+
 // Metadata contains metadata about a session
 type Metadata struct {
-	ProviderID   string    `json:"providerID"`
-	ModelID      string    `json:"modelID"`
-	CreatedAt    time.Time `json:"createdAt"`
-	LastAccessed time.Time `json:"lastAccessed"`
+	ProviderID   string     `json:"providerID"`
+	ModelID      string     `json:"modelID"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	LastAccessed time.Time  `json:"lastAccessed"`
+	Todos        []TodoItem `json:"todos,omitempty"`
 }
 
 // Session represents a single chat session.
