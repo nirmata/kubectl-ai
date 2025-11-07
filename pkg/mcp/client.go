@@ -16,6 +16,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 
@@ -426,12 +427,23 @@ func processToolResponse(result any) (string, error) {
 	// Check for Content field
 	contentField := rv.FieldByName("Content")
 	if contentField.IsValid() && contentField.Len() > 0 {
-		// Let's rely on the AsTextContent method from MCP package
-		// which handles the specific response format
-		content := contentField.Index(0).Interface()
-		if textContent, ok := mcp.AsTextContent(content); ok {
-			return textContent.Text, nil
+		var contentBuffer string
+		for i := 0; i < contentField.Len(); i++ {
+			content := contentField.Index(i).Interface()
+			if textContent, ok := mcp.AsTextContent(content); ok {
+				contentBuffer += textContent.Text + "\n"
+			} else if embeddedResource, ok := mcp.AsEmbeddedResource(content); ok {
+				// Extract the resource from the embedded resource
+				if embeddedResource.Resource != nil {
+					stringifiedResource, err := json.Marshal(embeddedResource.Resource)
+					if err != nil {
+						return "", fmt.Errorf("marshalling embedded resource: %w", err)
+					}
+					contentBuffer += string(stringifiedResource) + "\n"
+				}
+			}
 		}
+		return contentBuffer, nil
 	}
 
 	// If we couldn't extract text content, return a generic message
