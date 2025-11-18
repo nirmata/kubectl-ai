@@ -55,11 +55,12 @@ const (
 )
 
 type Message struct {
-	ID        string
-	Source    MessageSource
-	Type      MessageType
-	Payload   any
-	Timestamp time.Time
+	ID         string
+	Source     MessageSource
+	Type       MessageType
+	Payload    any
+	Timestamp  time.Time
+	TokenCount *int // Actual token count from LLM usage metadata (nil if not available)
 }
 
 type MessageSource string

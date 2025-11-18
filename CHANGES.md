@@ -24,4 +24,10 @@ This fork extends kubectl-ai with additional features and security enhancements 
 - Ensures consistent security enforcement across all file operations
 - Maintains backward compatibility (no restrictions when no allowed directories specified)
 
+### Usage Enhancements
+
+#### Message Token Count
+
+**Issue**: It was difficult to associate an exact token count with each message in the tracked conversation history, so adding a `TokenCount` field to `api.Message` helped make this bookkeeping simpler.
+
 ---
