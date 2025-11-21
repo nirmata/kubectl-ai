@@ -69,7 +69,7 @@ nix-shell -p kubectl-ai
 
 ### Usage
 
-`kubectl-ai` supports AI models from `gemini`, `vertexai`, `azopenai`, `openai`, `grok`, `bedrock` and local LLM providers such as `ollama` and `llama.cpp`.
+`kubectl-ai` supports AI models from `gemini`, `vertexai`, `azopenai`, `openai`, `grok`, `bedrock`, `anthropic` and local LLM providers such as `ollama` and `llama.cpp`.
 
 #### Using Gemini (Default)
 
@@ -146,6 +146,31 @@ AWS Bedrock uses the standard AWS SDK credential chain, supporting:
 - IAM roles (for EC2/ECS/Lambda)
 - Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
 - AWS CLI configuration files
+
+#### Using Anthropic Claude API
+
+You can use Anthropic's Claude API directly with your API key:
+
+```bash
+# Set your Anthropic API key
+export ANTHROPIC_API_KEY=your_api_key_here
+
+# Use Claude Sonnet 4 (default)
+kubectl-ai --llm-provider=anthropic --model=claude-sonnet-4-20250514
+
+# Use Claude 3.7 Sonnet
+kubectl-ai --llm-provider=anthropic --model=claude-3-7-sonnet-20250219
+
+# Override model via environment variable
+export ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
+kubectl-ai --llm-provider=anthropic
+
+# Use custom base URL (for proxy/gateway scenarios)
+export ANTHROPIC_BASE_URL=https://your-proxy.example.com
+kubectl-ai --llm-provider=anthropic
+```
+
+The Anthropic provider supports configurable base URLs to work with proxies or gateways. If `ANTHROPIC_BASE_URL` is not set, it defaults to `https://api.anthropic.com`.
 
 #### Using Azure OpenAI
 
