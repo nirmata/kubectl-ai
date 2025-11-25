@@ -257,6 +257,8 @@ func (c *GoogleAIClient) GenerateCompletion(ctx context.Context, request *Comple
 
 // StartChat starts a new chat with the model.
 func (c *GoogleAIClient) StartChat(systemPrompt string, model string) Chat {
+	selectedModel := getGeminiModel(model)
+
 	// Some values that are recommended by aistudio
 	temperature := float32(1.0)
 	topK := float32(40)
@@ -264,7 +266,7 @@ func (c *GoogleAIClient) StartChat(systemPrompt string, model string) Chat {
 	maxOutputTokens := int32(8192)
 
 	chat := &GeminiChat{
-		model:  model,
+		model:  selectedModel,
 		client: c.client,
 		genConfig: &genai.GenerateContentConfig{
 			SystemInstruction: &genai.Content{
@@ -481,15 +483,18 @@ func (c *GeminiChat) SendStreaming(ctx context.Context, contents ...any) (ChatRe
 }
 
 func (c *GeminiChat) Initialize(messages []*api.Message) error {
-	klog.Info("Initializing gemini chat")
 	c.history = make([]*genai.Content, 0, len(messages))
-	for _, msg := range messages {
+	successCount := 0
+	for i, msg := range messages {
 		content, err := c.messageToContent(msg)
 		if err != nil {
+			klog.V(2).Infof("Skipping message %d (ID: %s): %v", i, msg.ID, err)
 			continue
 		}
 		c.history = append(c.history, content)
+		successCount++
 	}
+	klog.V(2).Infof("Initialized gemini chat with %d messages from history (successfully converted %d)", len(messages), successCount)
 	return nil
 }
 
@@ -506,12 +511,150 @@ func (c *GeminiChat) messageToContent(msg *api.Message) (*genai.Content, error) 
 		return nil, fmt.Errorf("unknown message source: %s", msg.Source)
 	}
 
-	parts, err := c.partsToGemini(msg.Payload)
+	// Process the message based on its type
+	parts, err := c.processAPIMessage(msg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert message payload to parts: %w", err)
+		return nil, fmt.Errorf("failed to process message: %w", err)
+	}
+
+	if len(parts) == 0 {
+		klog.V(2).Infof("Skipping message %s: no parts generated", msg.ID)
+		return nil, fmt.Errorf("no parts generated for message %s", msg.ID)
 	}
 
 	return &genai.Content{Role: role, Parts: parts}, nil
+}
+
+// processAPIMessage converts an api.Message to Gemini parts
+func (c *GeminiChat) processAPIMessage(msg *api.Message) ([]*genai.Part, error) {
+	var parts []*genai.Part
+
+	switch msg.Type {
+	case api.MessageTypeText:
+		if msg.Payload != nil {
+			if textPayload, ok := msg.Payload.(string); ok && textPayload != "" {
+				parts = append(parts, genai.NewPartFromText(textPayload))
+			} else if payloadMap, ok := msg.Payload.(map[string]any); ok {
+				if text, ok := payloadMap["text"].(string); ok && text != "" {
+					parts = append(parts, genai.NewPartFromText(text))
+				} else if content, ok := payloadMap["content"].(string); ok && content != "" {
+					parts = append(parts, genai.NewPartFromText(content))
+				}
+			}
+		}
+
+	case api.MessageTypeToolCallRequest:
+		if msg.Payload != nil {
+			if toolCallData, ok := msg.Payload.(map[string]any); ok {
+				functionCall, err := c.createFunctionCallFromPayload(toolCallData)
+				if err != nil {
+					klog.V(2).Infof("Failed to create function call: %v", err)
+					return nil, fmt.Errorf("failed to create function call from payload: %w", err)
+				}
+				if functionCall != nil {
+					parts = append(parts, &genai.Part{
+						FunctionCall: functionCall,
+					})
+				}
+			} else {
+				klog.V(2).Infof("Payload is not map[string]any: %T", msg.Payload)
+			}
+		}
+
+	case api.MessageTypeToolCallResponse:
+		if msg.Payload != nil {
+			if toolResultData, ok := msg.Payload.(map[string]any); ok {
+				functionResponse, err := c.createFunctionResponseFromPayload(toolResultData)
+				if err != nil {
+					klog.V(2).Infof("Failed to create function response: %v", err)
+					return nil, fmt.Errorf("failed to create function response from payload: %w", err)
+				}
+				if functionResponse != nil {
+					parts = append(parts, &genai.Part{
+						FunctionResponse: functionResponse,
+					})
+				}
+			} else {
+				klog.V(2).Infof("Payload is not map[string]any: %T", msg.Payload)
+			}
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported message type: %v", msg.Type)
+	}
+
+	return parts, nil
+}
+
+// createFunctionCallFromPayload creates a genai.FunctionCall from payload data
+func (c *GeminiChat) createFunctionCallFromPayload(payload map[string]any) (*genai.FunctionCall, error) {
+	// Extract required fields
+	toolCallID, hasID := payload["id"].(string)
+	if !hasID || toolCallID == "" {
+		return nil, fmt.Errorf("missing or invalid tool call ID")
+	}
+
+	name, hasName := payload["name"].(string)
+	if !hasName || name == "" {
+		return nil, fmt.Errorf("missing or invalid tool name")
+	}
+
+	// Extract arguments
+	var args map[string]any
+	if argsData, hasArgs := payload["arguments"]; hasArgs {
+		if argsMap, ok := argsData.(map[string]any); ok {
+			args = argsMap
+		} else if argsStr, ok := argsData.(string); ok {
+			// Try to parse JSON string
+			if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
+				klog.V(2).Infof("Failed to parse arguments JSON string: %v", err)
+				args = make(map[string]any)
+			}
+		}
+	}
+	if args == nil {
+		args = make(map[string]any)
+	}
+
+	return &genai.FunctionCall{
+		ID:   toolCallID,
+		Name: name,
+		Args: args,
+	}, nil
+}
+
+// createFunctionResponseFromPayload creates a genai.FunctionResponse from payload data
+func (c *GeminiChat) createFunctionResponseFromPayload(payload map[string]any) (*genai.FunctionResponse, error) {
+	// Extract required fields
+	toolCallID, hasID := payload["id"].(string)
+	if !hasID || toolCallID == "" {
+		return nil, fmt.Errorf("missing or invalid tool call ID")
+	}
+
+	name, hasName := payload["name"].(string)
+	if !hasName || name == "" {
+		return nil, fmt.Errorf("missing or invalid tool name")
+	}
+
+	// Extract result content
+	var result map[string]any
+	if resultData, hasResult := payload["result"]; hasResult {
+		if resultMap, ok := resultData.(map[string]any); ok {
+			result = resultMap
+		} else {
+			// Wrap non-map results
+			result = map[string]any{"content": resultData}
+		}
+	}
+	if result == nil {
+		result = make(map[string]any)
+	}
+
+	return &genai.FunctionResponse{
+		ID:       toolCallID,
+		Name:     name,
+		Response: result,
+	}, nil
 }
 
 // GeminiChatResponse is a response from the Gemini API.
@@ -671,4 +814,24 @@ func (c *GeminiChat) IsRetryableError(err error) bool {
 	// e.g., if errors.Is(err, specificLLMRateLimitError) { return true }
 
 	return false
+}
+
+// getGeminiModel returns the model to use, checking in order:
+// 1. Explicitly provided model
+// 2. Environment variable GEMINI_MODEL
+// 3. Default model (gemini-2.5-pro)
+func getGeminiModel(model string) string {
+	if model != "" {
+		klog.V(2).Infof("Using explicitly provided model: %s", model)
+		return model
+	}
+
+	if envModel := os.Getenv("GEMINI_MODEL"); envModel != "" {
+		klog.V(1).Infof("Using model from environment variable: %s", envModel)
+		return envModel
+	}
+
+	defaultModel := "gemini-2.5-pro"
+	klog.V(1).Infof("Using default model: %s", defaultModel)
+	return defaultModel
 }

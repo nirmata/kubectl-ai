@@ -63,4 +63,20 @@ kubectl-ai --provider anthropic --model claude-sonnet-4-20250514
 - Supports both streaming and non-streaming responses
 - Properly converts between `api.Message` format and Anthropic's message format for session persistence
 
+#### Gemini Provider Enhancements
+
+**Enhanced**: Improved support for session persistence and message type handling in the Gemini provider.
+
+**Features**:
+- Enhanced `Initialize` method to properly convert `api.Message` format to Gemini's native format
+- Full support for all message types: text messages, tool call requests, and tool call responses
+- Proper conversion between `api.Message` (used for session persistence) and Gemini's `genai.Content` format
+- Model name handling with support for explicit parameter, `GEMINI_MODEL` environment variable, or default model
+- Graceful handling of unsupported message types with clear error messages
+
+**Configuration**:
+- API key via `GEMINI_API_KEY` environment variable (required)
+- Optional model selection via `GEMINI_MODEL` environment variable
+- Default model: `gemini-2.5-pro` (when not explicitly provided)
+
 ---
