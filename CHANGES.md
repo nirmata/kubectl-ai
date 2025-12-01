@@ -24,4 +24,59 @@ This fork extends kubectl-ai with additional features and security enhancements 
 - Ensures consistent security enforcement across all file operations
 - Maintains backward compatibility (no restrictions when no allowed directories specified)
 
+### Usage Enhancements
+
+#### Message Token Count
+
+**Issue**: It was difficult to associate an exact token count with each message in the tracked conversation history, so adding a `TokenCount` field to `api.Message` helped make this bookkeeping simpler.
+
+### Provider Enhancements
+
+#### Anthropic Provider Support
+
+**Added**: Support for the Anthropic Claude API as a new LLM provider in `gollm`.
+
+**Features**:
+- Direct integration with Anthropic's Messages API (v1)
+- Configurable base URL for proxy/gateway scenarios
+- Support for streaming responses with Server-Sent Events (SSE)
+- Full support for tool/function calling with fine-grained streaming (`input_json_delta` events)
+- Dynamic model listing via Anthropic API with fallback to hardcoded list
+- Session persistence compatibility with proper handling of tool calls and tool results
+
+**Configuration**:
+- API key via `ANTHROPIC_API_KEY` environment variable
+- Optional base URL via `ANTHROPIC_BASE_URL` environment variable or `ClientOptions.URL`
+- Optional model selection via `ANTHROPIC_MODEL` environment variable
+- Default model: `claude-sonnet-4-20250514`
+
+**Usage**: 
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+kubectl-ai --provider anthropic --model claude-sonnet-4-20250514
+```
+
+**Implementation Details**:
+- Provider name: `anthropic`
+- Implements `gollm.Client` and `gollm.Chat` interfaces
+- Handles Anthropic-specific message format, system prompts, and tool use
+- Supports both streaming and non-streaming responses
+- Properly converts between `api.Message` format and Anthropic's message format for session persistence
+
+#### Gemini Provider Enhancements
+
+**Enhanced**: Improved support for session persistence and message type handling in the Gemini provider.
+
+**Features**:
+- Enhanced `Initialize` method to properly convert `api.Message` format to Gemini's native format
+- Full support for all message types: text messages, tool call requests, and tool call responses
+- Proper conversion between `api.Message` (used for session persistence) and Gemini's `genai.Content` format
+- Model name handling with support for explicit parameter, `GEMINI_MODEL` environment variable, or default model
+- Graceful handling of unsupported message types with clear error messages
+
+**Configuration**:
+- API key via `GEMINI_API_KEY` environment variable (required)
+- Optional model selection via `GEMINI_MODEL` environment variable
+- Default model: `gemini-2.5-pro` (when not explicitly provided)
+
 ---
