@@ -271,8 +271,255 @@ func (c *AzureOpenAIChat) IsRetryableError(err error) bool {
 }
 
 func (c *AzureOpenAIChat) Initialize(messages []*api.Message) error {
-	klog.Warning("chat history persistence is not supported for provider 'azopenai', using in-memory chat history")
+	klog.V(2).Infof("Initializing Azure OpenAI chat from resumed session: %d messages to process", len(messages))
+
+	// Reset history but keep the system prompt (first message if it's a system message)
+	// Find the system message if it exists
+	var systemMessage *azopenai.ChatRequestSystemMessage
+	if len(c.history) > 0 {
+		if sysMsg, ok := c.history[0].(*azopenai.ChatRequestSystemMessage); ok {
+			systemMessage = sysMsg
+		}
+	}
+
+	// Start fresh history with system message if it exists
+	if systemMessage != nil {
+		c.history = []azopenai.ChatRequestMessageClassification{systemMessage}
+	} else {
+		c.history = make([]azopenai.ChatRequestMessageClassification, 0, len(messages)+1)
+	}
+
+	for i, msg := range messages {
+		// Convert api.Message to Azure OpenAI message format
+		azureMessages, err := c.processAPIMessage(msg)
+		if err != nil {
+			klog.V(2).Infof("Failed to process message %s: %v", msg.ID, err)
+			continue
+		}
+
+		if len(azureMessages) == 0 {
+			klog.V(2).Infof("Skipping message %d: no content generated", i)
+			continue
+		}
+
+		c.history = append(c.history, azureMessages...)
+	}
+
+	klog.V(2).Infof("Azure OpenAI chat initialized: %d messages in conversation history", len(c.history))
 	return nil
+}
+
+// processAPIMessage converts an api.Message to Azure OpenAI message format
+func (c *AzureOpenAIChat) processAPIMessage(msg *api.Message) ([]azopenai.ChatRequestMessageClassification, error) {
+	var azureMessages []azopenai.ChatRequestMessageClassification
+
+	switch msg.Type {
+	case api.MessageTypeText:
+		if msg.Payload != nil {
+			var textContent string
+			if textPayload, ok := msg.Payload.(string); ok {
+				textContent = textPayload
+			} else if payloadBytes, ok := msg.Payload.([]byte); ok {
+				textContent = string(payloadBytes)
+			} else {
+				textContent = fmt.Sprintf("%v", msg.Payload)
+			}
+
+			if textContent != "" {
+				// Determine role based on message source
+				switch msg.Source {
+				case api.MessageSourceUser:
+					azureMessages = append(azureMessages, &azopenai.ChatRequestUserMessage{
+						Content: azopenai.NewChatRequestUserMessageContent(textContent),
+					})
+				case api.MessageSourceAgent, api.MessageSourceModel:
+					azureMessages = append(azureMessages, &azopenai.ChatRequestAssistantMessage{
+						Content: azopenai.NewChatRequestAssistantMessageContent(textContent),
+					})
+				default:
+					klog.V(2).Infof("Unknown message source %s, defaulting to user", msg.Source)
+					azureMessages = append(azureMessages, &azopenai.ChatRequestUserMessage{
+						Content: azopenai.NewChatRequestUserMessageContent(textContent),
+					})
+				}
+			}
+		}
+
+	case api.MessageTypeToolCallRequest:
+		if msg.Payload != nil {
+			var toolCallData map[string]any
+			if payloadMap, ok := msg.Payload.(map[string]any); ok {
+				toolCallData = payloadMap
+			} else if payloadBytes, ok := msg.Payload.([]byte); ok {
+				if err := json.Unmarshal(payloadBytes, &toolCallData); err != nil {
+					return nil, fmt.Errorf("failed to unmarshal tool call payload: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("tool call payload is not map[string]any or []byte: %T", msg.Payload)
+			}
+
+			toolCall, err := c.createToolCallFromPayload(toolCallData)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create tool call from payload: %w", err)
+			}
+
+			if toolCall != nil {
+				// Create assistant message with tool call
+				content := azopenai.NewChatRequestAssistantMessageContent("")
+				azureMessages = append(azureMessages, &azopenai.ChatRequestAssistantMessage{
+					Content:   content,
+					ToolCalls: []azopenai.ChatCompletionsToolCallClassification{toolCall},
+				})
+			}
+		}
+
+	case api.MessageTypeToolCallResponse:
+		if msg.Payload != nil {
+			var toolResultData map[string]any
+			if payloadMap, ok := msg.Payload.(map[string]any); ok {
+				toolResultData = payloadMap
+			} else if payloadBytes, ok := msg.Payload.([]byte); ok {
+				if err := json.Unmarshal(payloadBytes, &toolResultData); err != nil {
+					return nil, fmt.Errorf("failed to unmarshal tool result payload: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("tool result payload is not map[string]any or []byte: %T", msg.Payload)
+			}
+
+			toolCallID, hasID := toolResultData["id"].(string)
+			if !hasID || toolCallID == "" {
+				if altID, ok := toolResultData["tool_call_id"].(string); ok && altID != "" {
+					toolCallID = altID
+				} else {
+					return nil, fmt.Errorf("missing or invalid tool call ID in tool result")
+				}
+			}
+
+			// Extract result content
+			var resultContent string
+			if resultData, hasResult := toolResultData["result"]; hasResult {
+				if str, ok := resultData.(string); ok {
+					resultContent = str
+				} else {
+					jsonData, err := json.Marshal(resultData)
+					if err != nil {
+						resultContent = fmt.Sprintf("%v", resultData)
+					} else {
+						resultContent = string(jsonData)
+					}
+				}
+			} else if output, hasOutput := toolResultData["output"]; hasOutput {
+				if str, ok := output.(string); ok {
+					resultContent = str
+				} else {
+					jsonData, err := json.Marshal(output)
+					if err != nil {
+						resultContent = fmt.Sprintf("%v", output)
+					} else {
+						resultContent = string(jsonData)
+					}
+				}
+			}
+
+			// Create user message with tool result
+			azureMessages = append(azureMessages, &azopenai.ChatRequestUserMessage{
+				Content: azopenai.NewChatRequestUserMessageContent(resultContent),
+			})
+		}
+
+	case api.MessageTypeError:
+		errorText := "Error: "
+		if msg.Payload != nil {
+			if textPayload, ok := msg.Payload.(string); ok {
+				errorText += textPayload
+			} else {
+				errorText += fmt.Sprintf("%v", msg.Payload)
+			}
+		}
+		azureMessages = append(azureMessages, &azopenai.ChatRequestUserMessage{
+			Content: azopenai.NewChatRequestUserMessageContent(errorText),
+		})
+
+	default:
+		// For unknown message types, try to extract text content
+		if msg.Payload != nil {
+			var textContent string
+			if textPayload, ok := msg.Payload.(string); ok {
+				textContent = textPayload
+			} else {
+				textContent = fmt.Sprintf("%v", msg.Payload)
+			}
+
+			if textContent != "" {
+				azureMessages = append(azureMessages, &azopenai.ChatRequestUserMessage{
+					Content: azopenai.NewChatRequestUserMessageContent(textContent),
+				})
+			}
+		}
+	}
+
+	klog.V(2).Infof("Generated %d Azure OpenAI messages", len(azureMessages))
+	return azureMessages, nil
+}
+
+// createToolCallFromPayload creates an Azure OpenAI tool call from payload data
+func (c *AzureOpenAIChat) createToolCallFromPayload(payload map[string]any) (*azopenai.ChatCompletionsFunctionToolCall, error) {
+	// Extract required fields
+	toolCallID, hasID := payload["id"].(string)
+	if !hasID || toolCallID == "" {
+		return nil, fmt.Errorf("missing or invalid tool call ID")
+	}
+
+	name, hasName := payload["name"].(string)
+	if !hasName || name == "" {
+		return nil, fmt.Errorf("missing or invalid tool name")
+	}
+
+	// Extract arguments
+	var argsJSON []byte
+	if argsData, hasArgs := payload["arguments"]; hasArgs {
+		if argsMap, ok := argsData.(map[string]any); ok {
+			var err error
+			argsJSON, err = json.Marshal(argsMap)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal arguments: %w", err)
+			}
+		} else if argsStr, ok := argsData.(string); ok {
+			// Validate it's valid JSON
+			var testMap map[string]any
+			if err := json.Unmarshal([]byte(argsStr), &testMap); err != nil {
+				return nil, fmt.Errorf("arguments string is not valid JSON: %w", err)
+			}
+			argsJSON = []byte(argsStr)
+		} else {
+			return nil, fmt.Errorf("arguments must be map[string]any or JSON string, got %T", argsData)
+		}
+	}
+
+	if argsJSON == nil {
+		argsJSON = []byte("{}")
+	}
+
+	// Create Azure OpenAI function call
+	argsStr := string(argsJSON)
+	functionCall := &azopenai.FunctionCall{
+		Name:      &name,
+		Arguments: &argsStr,
+	}
+
+	// Create tool call
+	toolCall := &azopenai.ChatCompletionsFunctionToolCall{
+		ID:       &toolCallID,
+		Type:     toPtr("function"),
+		Function: functionCall,
+	}
+
+	return toolCall, nil
+}
+
+// Helper function to create a pointer to a string
+func toPtr(s string) *string {
+	return &s
 }
 
 func (c *AzureOpenAIChat) SendStreaming(ctx context.Context, contents ...any) (ChatResponseIterator, error) {
@@ -402,20 +649,8 @@ func (c *AzureOpenAIChat) SetFunctionDefinitions(functionDefinitions []*Function
 }
 
 func fnDefToAzureOpenAITool(fnDef *FunctionDefinition) *azopenai.ChatCompletionsFunctionToolDefinitionFunction {
-	properties := make(map[string]any)
-	for paramName, param := range fnDef.Parameters.Properties {
-		properties[paramName] = map[string]any{
-			"type":        string(param.Type),
-			"description": param.Description,
-		}
-	}
-	parameters := map[string]any{
-		"type":       "object",
-		"properties": properties,
-	}
-	if len(fnDef.Parameters.Required) > 0 {
-		parameters["required"] = fnDef.Parameters.Required
-	}
+	// Convert the schema recursively
+	parameters := convertSchemaToAzureOpenAIFormat(fnDef.Parameters)
 	jsonBytes, _ := json.Marshal(parameters)
 
 	tool := azopenai.ChatCompletionsFunctionToolDefinitionFunction{
@@ -425,4 +660,51 @@ func fnDefToAzureOpenAITool(fnDef *FunctionDefinition) *azopenai.ChatCompletions
 	}
 
 	return &tool
+}
+
+// convertSchemaToAzureOpenAIFormat recursively converts a Schema to Azure OpenAI format
+func convertSchemaToAzureOpenAIFormat(schema *Schema) map[string]any {
+	if schema == nil {
+		return map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+
+	result := make(map[string]any)
+
+	// Set type
+	if schema.Type != "" {
+		result["type"] = string(schema.Type)
+	}
+
+	// Set description if present
+	if schema.Description != "" {
+		result["description"] = schema.Description
+	}
+
+	// Handle object types
+	if schema.Type == TypeObject {
+		properties := make(map[string]any)
+		if schema.Properties != nil {
+			for propName, propSchema := range schema.Properties {
+				properties[propName] = convertSchemaToAzureOpenAIFormat(propSchema)
+			}
+		}
+		result["properties"] = properties
+
+		// Add required fields if present
+		if len(schema.Required) > 0 {
+			result["required"] = schema.Required
+		}
+	}
+
+	// Handle array types - Azure OpenAI requires items field
+	if schema.Type == TypeArray {
+		if schema.Items != nil {
+			result["items"] = convertSchemaToAzureOpenAIFormat(schema.Items)
+		} else {
+			// Default to string items if not specified (Azure OpenAI requirement)
+			result["items"] = map[string]any{"type": "string"}
+		}
+	}
+
+	return result
 }
