@@ -79,4 +79,33 @@ kubectl-ai --provider anthropic --model claude-sonnet-4-20250514
 - Optional model selection via `GEMINI_MODEL` environment variable
 - Default model: `gemini-2.5-pro` (when not explicitly provided)
 
+#### Azure OpenAI Provider Enhancements
+
+**Enhanced**: Implemented full session persistence support and fixed function schema conversion for Azure OpenAI provider.
+
+**Features**:
+- Implemented `Initialize` method to properly convert `api.Message` format to Azure OpenAI's native message format
+- Full support for all message types: text messages, tool call requests, tool call responses, and error messages
+- Proper conversion between `api.Message` (used for session persistence) and Azure OpenAI's `ChatRequestMessageClassification` format
+- Fixed function schema conversion to properly handle array types with required `items` field
+- Recursive schema conversion supporting nested objects and arrays
+- Support for both API key and Azure AD credential authentication
+
+**Configuration**:
+- Endpoint via `AZURE_OPENAI_ENDPOINT` environment variable (required)
+- API key via `AZURE_OPENAI_API_KEY` environment variable (optional, can use Azure AD credentials via `az login`)
+- Model (deployment name) must be specified via `--model` flag (no default)
+
+**Implementation Details**:
+- Provider name: `azopenai`
+- Properly handles Azure OpenAI's message structure with system, user, and assistant messages
+- Tool calls are structured as assistant messages with `ToolCalls` array
+- Tool results are sent as user messages following assistant messages with tool calls
+- Function schemas are recursively converted to ensure array types include `items` field (required by Azure OpenAI API)
+- Preserves system prompt when initializing from session history
+
+**Bug Fixes**:
+- Fixed `invalid_function_parameters` error when functions contain array parameters by ensuring `items` field is included in array schemas
+- Fixed schema conversion to handle nested structures (arrays of objects, objects with arrays, etc.)
+
 ---
