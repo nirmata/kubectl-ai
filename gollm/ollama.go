@@ -279,9 +279,11 @@ func (p *OllamaPart) AsFunctionCalls() ([]FunctionCall, bool) {
 	if len(p.toolCalls) > 0 {
 		var functionCalls []FunctionCall
 		for _, toolCall := range p.toolCalls {
+			// Convert ToolCallFunctionArguments to map[string]any
+			argsMap := toolCall.Function.Arguments.ToMap()
 			functionCalls = append(functionCalls, FunctionCall{
 				Name:      toolCall.Function.Name,
-				Arguments: toolCall.Function.Arguments,
+				Arguments: argsMap,
 			})
 		}
 		return functionCalls, true
@@ -299,19 +301,20 @@ func (c *OllamaChat) SetFunctionDefinitions(functionDefinitions []*FunctionDefin
 }
 
 func fnDefToOllamaTool(fnDef *FunctionDefinition) api.Tool {
-	parameters := api.ToolFunctionParameters{
-		Type:       "object",
-		Required:   fnDef.Parameters.Required,
-		Properties: make(map[string]api.ToolProperty),
-	}
-
+	properties := api.NewToolPropertiesMap()
+	
 	for paramName, param := range fnDef.Parameters.Properties {
 		property := api.ToolProperty{
 			Type:        api.PropertyType{string(param.Type)},
 			Description: param.Description,
 		}
+		properties.Set(paramName, property)
+	}
 
-		parameters.Properties[paramName] = property
+	parameters := api.ToolFunctionParameters{
+		Type:       "object",
+		Required:   fnDef.Parameters.Required,
+		Properties: properties,
 	}
 
 	tool := api.Tool{
