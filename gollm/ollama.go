@@ -310,7 +310,7 @@ func fnDefToOllamaTool(fnDef *FunctionDefinition) api.Tool {
 			Type:        api.PropertyType{string(param.Type)},
 			Description: param.Description,
 		}
-		
+
 		parameters.Properties[paramName] = property
 	}
 

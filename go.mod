@@ -1,8 +1,8 @@
 module github.com/GoogleCloudPlatform/kubectl-ai
 
-go 1.24.0
+go 1.24.1
 
-toolchain go1.24.3
+toolchain go1.24.4
 
 // Needed for multiple go modules in one repo
 replace github.com/GoogleCloudPlatform/kubectl-ai/gollm => ./gollm
@@ -88,7 +88,7 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
-	github.com/ollama/ollama v0.12.4 // indirect
+	github.com/ollama/ollama v0.13.5 // indirect
 	github.com/openai/openai-go v1.12.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
@@ -110,7 +110,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.34.0 // indirect
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sys v0.32.0 // indirect
+	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	google.golang.org/genai v1.8.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250219182151-9fdb1cabc7b2 // indirect
