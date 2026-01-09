@@ -14,7 +14,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.36.6
 	github.com/aws/aws-sdk-go-v2/config v1.29.18
 	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.31.1
-	github.com/ollama/ollama v0.6.5
+	github.com/ollama/ollama v0.12.4
 	github.com/openai/openai-go v1.11.0
 	google.golang.org/genai v1.8.0
 	k8s.io/klog/v2 v2.130.1

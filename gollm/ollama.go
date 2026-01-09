@@ -299,40 +299,28 @@ func (c *OllamaChat) SetFunctionDefinitions(functionDefinitions []*FunctionDefin
 }
 
 func fnDefToOllamaTool(fnDef *FunctionDefinition) api.Tool {
+	parameters := api.ToolFunctionParameters{
+		Type:       "object",
+		Required:   fnDef.Parameters.Required,
+		Properties: make(map[string]api.ToolProperty),
+	}
+
+	for paramName, param := range fnDef.Parameters.Properties {
+		property := api.ToolProperty{
+			Type:        api.PropertyType{string(param.Type)},
+			Description: param.Description,
+		}
+		
+		parameters.Properties[paramName] = property
+	}
+
 	tool := api.Tool{
 		Type: "function",
 		Function: api.ToolFunction{
 			Name:        fnDef.Name,
 			Description: fnDef.Description,
-			Parameters: struct {
-				Type       string   `json:"type"`
-				Required   []string `json:"required"`
-				Properties map[string]struct {
-					Type        string   `json:"type"`
-					Description string   `json:"description"`
-					Enum        []string `json:"enum,omitempty"`
-				} `json:"properties"`
-			}{
-				Type:     "object",
-				Required: fnDef.Parameters.Required,
-				Properties: map[string]struct {
-					Type        string   `json:"type"`
-					Description string   `json:"description"`
-					Enum        []string `json:"enum,omitempty"`
-				}{},
-			},
+			Parameters:  parameters,
 		},
-	}
-
-	for paramName, param := range fnDef.Parameters.Properties {
-		tool.Function.Parameters.Properties[paramName] = struct {
-			Type        string   `json:"type"`
-			Description string   `json:"description"`
-			Enum        []string `json:"enum,omitempty"`
-		}{
-			Type:        string(param.Type),
-			Description: param.Description,
-		}
 	}
 
 	return tool
