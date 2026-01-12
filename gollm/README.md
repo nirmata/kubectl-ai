@@ -13,7 +13,7 @@ gollm provides a consistent API for interacting with various LLM providers, maki
 
 ## Features
 
-- **Multi-provider support**: OpenAI, Azure OpenAI, Google Gemini, Ollama, LlamaCPP, Grok, and more
+- **Multi-provider support**: OpenAI, Azure OpenAI, Google Gemini, LlamaCPP, Grok, and more
 - **Unified interface**: Consistent API across all providers
 - **Chat conversations**: Multi-turn conversations with conversation history
 - **Function calling**: Define and use custom functions with LLMs
@@ -31,7 +31,6 @@ gollm provides a consistent API for interacting with various LLM providers, maki
 | Azure OpenAI | `azopenai://` | Microsoft Azure's OpenAI service |
 | Google Gemini | `gemini://` | Google's Gemini models |
 | Vertex AI | `vertexai://` | Google Cloud Vertex AI (via Gemini) |
-| Ollama | `ollama://` | Local Ollama models |
 | LlamaCPP | `llamacpp://` | Local LlamaCPP models |
 | Grok | `grok://` | xAI's Grok models |
 
@@ -98,9 +97,6 @@ export AZURE_OPENAI_API_KEY="your-api-key"
 # Google Gemini
 export LLM_CLIENT="gemini://generativelanguage.googleapis.com"
 export GOOGLE_API_KEY="your-api-key"
-
-# Ollama (local)
-export LLM_CLIENT="ollama://localhost:11434"
 ```
 
 
