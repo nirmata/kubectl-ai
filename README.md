@@ -69,7 +69,7 @@ nix-shell -p kubectl-ai
 
 ### Usage
 
-`kubectl-ai` supports AI models from `gemini`, `vertexai`, `azopenai`, `openai`, `grok`, `bedrock`, `anthropic` and local LLM providers such as `ollama` and `llama.cpp`.
+`kubectl-ai` supports AI models from `gemini`, `vertexai`, `azopenai`, `openai`, `grok`, `bedrock`, `anthropic` and local LLM providers such as `llama.cpp`.
 
 #### Using Gemini (Default)
 
@@ -89,26 +89,11 @@ kubectl-ai --quiet --model gemini-2.5-flash-preview-04-17 "check logs for nginx 
 <details>
 <summary>Use other AI models</summary>
 
-#### Using AI models running locally (ollama or llama.cpp)
+#### Using AI models running locally (llama.cpp)
 
-You can use `kubectl-ai` with AI models running locally. `kubectl-ai` supports [ollama](https://ollama.com/) and [llama.cpp](https://github.com/ggml-org/llama.cpp) to use the AI models running locally.
+You can use `kubectl-ai` with AI models running locally. `kubectl-ai` supports [llama.cpp](https://github.com/ggml-org/llama.cpp) to use the AI models running locally.
 
 Additionally, the [`modelserving`](modelserving) directory provides tools and instructions for deploying your own `llama.cpp`-based LLM serving endpoints locally or on a Kubernetes cluster. This allows you to host models like Gemma directly in your environment.
-
-An example of using Google's `gemma3` model with `ollama`:
-
-```shell
-# assuming ollama is already running and you have pulled one of the gemma models
-# ollama pull gemma3:12b-it-qat
-
-# if your ollama server is at remote, use OLLAMA_HOST variable to specify the host
-# export OLLAMA_HOST=http://192.168.1.3:11434/
-
-# enable-tool-use-shim because models require special prompting to enable tool calling
-kubectl-ai --llm-provider ollama --model gemma3:12b-it-qat --enable-tool-use-shim
-
-# you can use `models` command to discover the locally available models
->> models
 ```
 
 #### Using Grok

@@ -50,7 +50,7 @@ The `run` subcommand executes the benchmark evaluations.
 | `--tasks-dir` | Directory containing evaluation tasks | ./tasks | No |
 | `--kubeconfig` | Path to kubeconfig file | ~/.kube/config | No |
 | `--task-pattern` | Pattern to filter tasks (e.g. 'pod' or 'redis') | - | No |
-| `--llm-provider` | Specific LLM provider to evaluate (e.g. 'gemini' or 'ollama') | gemini | No |
+| `--llm-provider` | Specific LLM provider to evaluate (e.g. 'gemini') | gemini | No |
 | `--models` | Comma-separated list of models to evaluate | gemini-2.5-pro-preview-03-25 | No |
 | `--enable-tool-use-shim` | Enable tool use shim | false | No |
 | `--quiet` | Quiet mode (non-interactive mode) | true | No |
