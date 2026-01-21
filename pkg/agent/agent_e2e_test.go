@@ -150,6 +150,11 @@ func TestAgentEndToEndToolExecution(t *testing.T) {
 		Model:            "test-model",
 		Tools:            toolset,
 		MaxIterations:    4,
+		Session: &api.Session{
+			ID:               "test-session",
+			ChatMessageStore: store,
+			AgentState:       api.AgentStateIdle,
+		},
 	}
 
 	if err := a.Init(ctx); err != nil {
@@ -253,6 +258,11 @@ func TestAgentEndToEndMetaClear(t *testing.T) {
 		LLM:              client,
 		Model:            "test-model",
 		Tools:            toolset,
+		Session: &api.Session{
+			ID:               "test-session",
+			ChatMessageStore: store,
+			AgentState:       api.AgentStateIdle,
+		},
 	}
 
 	if err := a.Init(ctx); err != nil {

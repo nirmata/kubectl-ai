@@ -15,19 +15,22 @@
 package api
 
 import (
+	"fmt"
 	"time"
 )
 
 type Session struct {
-	ID           string
-	Messages     []*Message
-	AgentState   AgentState
-	CreatedAt    time.Time
-	LastModified time.Time
+	ID               string
+	Name             string
+	ProviderID       string
+	ModelID          string
+	Messages         []*Message
+	AgentState       AgentState
+	CreatedAt        time.Time
+	LastModified     time.Time
+	ChatMessageStore ChatMessageStore
 	// MCP status information
 	MCPStatus *MCPStatus
-	// ChatMessageStore is an interface that allows the session to store and retrieve chat messages.
-	ChatMessageStore ChatMessageStore
 }
 
 type AgentState string
@@ -124,5 +127,13 @@ type ChatMessageStore interface {
 }
 
 func (s *Session) AllMessages() []*Message {
+	if s.ChatMessageStore == nil {
+		return nil
+	}
 	return s.ChatMessageStore.ChatMessages()
+}
+
+func (s *Session) String() string {
+	return fmt.Sprintf("Session ID: %s\nProvider: %s\nModel: %s\nCreated At: %s\nLast Modified: %s\nAgent State: %s",
+		s.ID, s.ProviderID, s.ModelID, s.CreatedAt.Format(time.RFC3339), s.LastModified.Format(time.RFC3339), s.AgentState)
 }
