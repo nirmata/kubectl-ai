@@ -156,7 +156,16 @@ func (e *APIError) Unwrap() error {
 	return e.Err
 }
 
-// IsRetryableFunc defines the signature for functions that check if an error is retryable.
+// NewAPIError creates a new APIError with the given status code, message, and optional underlying error.
+func NewAPIError(statusCode int, message string, err error) *APIError {
+	return &APIError{
+		StatusCode: statusCode,
+		Message:    message,
+		Err:        err,
+	}
+}
+
+// IsRetryableFunc is a function type that determines if an error should be retried.
 // TODO (droot): Adjust the signature to allow underlying client to relay the backoff
 // delay etc. for example, Gemini's error codes contain retryDelay information.
 type IsRetryableFunc func(error) bool
@@ -259,11 +268,12 @@ func Retry[T any](
 		}
 
 		if !isRetryable(lastErr) {
-			log.Info("Attempt failed with non-retryable error", "attempt", attempt, "error", lastErr)
+			log.V(1).Info("Attempt failed with non-retryable error", "attempt", attempt, "error", lastErr)
 			return zero, lastErr // Return the non-retryable error immediately
 		}
 
-		log.Info("Attempt failed with retryable error", "attempt", attempt, "error", lastErr)
+		log.V(2).Info("Attempt failed with retryable error", "attempt", attempt, "error", lastErr)
+		fmt.Println("Retrying...")
 
 		if attempt == config.MaxAttempts {
 			// Max attempts reached
@@ -330,9 +340,15 @@ func (rc *retryChat[C]) Send(ctx context.Context, contents ...any) (ChatResponse
 	return Retry[ChatResponse](ctx, rc.config, rc.underlying.IsRetryableError, operation)
 }
 
-// Embed implements the Client interface for the retryClient decorator.
+// SendStreaming implements retry logic for streaming requests
 func (rc *retryChat[C]) SendStreaming(ctx context.Context, contents ...any) (ChatResponseIterator, error) {
-	return rc.underlying.SendStreaming(ctx, contents...)
+	// Define the operation
+	operation := func(ctx context.Context) (ChatResponseIterator, error) {
+		return rc.underlying.SendStreaming(ctx, contents...)
+	}
+
+	// Execute with retry
+	return Retry[ChatResponseIterator](ctx, rc.config, rc.underlying.IsRetryableError, operation)
 }
 
 func (rc *retryChat[C]) SetFunctionDefinitions(functionDefinitions []*FunctionDefinition) error {

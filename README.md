@@ -83,7 +83,7 @@ nix-shell -p kubectl-ai
 
 ### Usage
 
-`kubectl-ai` supports AI models from `gemini`, `vertexai`, `azopenai`, `openai`, `grok`, `bedrock` and local LLM providers such as `ollama` and `llama.cpp`.
+`kubectl-ai` supports AI models from `gemini`, `vertexai`, `azopenai`, `openai`, `grok`, `bedrock`, `anthropic` and local LLM providers such as `llama.cpp`.
 
 #### Using Gemini (Default)
 
@@ -103,26 +103,11 @@ kubectl-ai --quiet --model gemini-2.5-flash-preview-04-17 "check logs for nginx 
 <details>
 <summary>Use other AI models</summary>
 
-#### Using AI models running locally (ollama or llama.cpp)
+#### Using AI models running locally (llama.cpp)
 
-You can use `kubectl-ai` with AI models running locally. `kubectl-ai` supports [ollama](https://ollama.com/) and [llama.cpp](https://github.com/ggml-org/llama.cpp) to use the AI models running locally.
+You can use `kubectl-ai` with AI models running locally. `kubectl-ai` supports [llama.cpp](https://github.com/ggml-org/llama.cpp) to use the AI models running locally.
 
 Additionally, the [`modelserving`](modelserving) directory provides tools and instructions for deploying your own `llama.cpp`-based LLM serving endpoints locally or on a Kubernetes cluster. This allows you to host models like Gemma directly in your environment.
-
-An example of using Google's `gemma3` model with `ollama`:
-
-```shell
-# assuming ollama is already running and you have pulled one of the gemma models
-# ollama pull gemma3:12b-it-qat
-
-# if your ollama server is at remote, use OLLAMA_HOST variable to specify the host
-# export OLLAMA_HOST=http://192.168.1.3:11434/
-
-# enable-tool-use-shim because models require special prompting to enable tool calling
-kubectl-ai --llm-provider ollama --model gemma3:12b-it-qat --enable-tool-use-shim
-
-# you can use `models` command to discover the locally available models
->> models
 ```
 
 #### Using Grok
@@ -160,6 +145,31 @@ AWS Bedrock uses the standard AWS SDK credential chain, supporting:
 - IAM roles (for EC2/ECS/Lambda)
 - Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
 - AWS CLI configuration files
+
+#### Using Anthropic Claude API
+
+You can use Anthropic's Claude API directly with your API key:
+
+```bash
+# Set your Anthropic API key
+export ANTHROPIC_API_KEY=your_api_key_here
+
+# Use Claude Sonnet 4 (default)
+kubectl-ai --llm-provider=anthropic --model=claude-sonnet-4-20250514
+
+# Use Claude 3.7 Sonnet
+kubectl-ai --llm-provider=anthropic --model=claude-3-7-sonnet-20250219
+
+# Override model via environment variable
+export ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
+kubectl-ai --llm-provider=anthropic
+
+# Use custom base URL (for proxy/gateway scenarios)
+export ANTHROPIC_BASE_URL=https://your-proxy.example.com
+kubectl-ai --llm-provider=anthropic
+```
+
+The Anthropic provider supports configurable base URLs to work with proxies or gateways. If `ANTHROPIC_BASE_URL` is not set, it defaults to `https://api.anthropic.com`.
 
 #### Using Azure OpenAI
 

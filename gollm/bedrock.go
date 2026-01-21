@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -144,7 +146,7 @@ type bedrockChat struct {
 func (cs *bedrockChat) Initialize(history []*api.Message) error {
 	cs.messages = make([]types.Message, 0, len(history))
 
-	for _, msg := range history {
+	for i, msg := range history {
 		// Convert api.Message to types.Message
 		var role types.ConversationRole
 		switch msg.Source {
@@ -153,33 +155,30 @@ func (cs *bedrockChat) Initialize(history []*api.Message) error {
 		case api.MessageSourceModel, api.MessageSourceAgent:
 			role = types.ConversationRoleAssistant
 		default:
-			// Skip unknown message sources
+			klog.V(2).Infof("Skipping message %d: unknown source %s", i, msg.Source)
 			continue
 		}
 
-		// Convert payload to string content
-		var content string
-		if msg.Type == api.MessageTypeText && msg.Payload != nil {
-			if textPayload, ok := msg.Payload.(string); ok {
-				content = textPayload
-			} else {
-				// Try to convert other types to string
-				content = fmt.Sprintf("%v", msg.Payload)
-			}
-		} else {
-			// Skip non-text messages for now
+		// Process the message based on its type
+		contentBlocks, err := cs.processAPIMessage(msg)
+		if err != nil {
+			klog.V(2).Infof("Failed to process message %s: %v", msg.ID, err)
 			continue
 		}
 
-		if content == "" {
+		klog.V(2).Infof("Message %d: Generated %d content blocks", i, len(contentBlocks))
+		for j, block := range contentBlocks {
+			klog.V(2).Infof("  ContentBlock %d: %T", j, block)
+		}
+
+		if len(contentBlocks) == 0 {
+			klog.V(2).Infof("Skipping message %d: no content blocks generated", i)
 			continue
 		}
 
 		bedrockMsg := types.Message{
-			Role: role,
-			Content: []types.ContentBlock{
-				&types.ContentBlockMemberText{Value: content},
-			},
+			Role:    role,
+			Content: contentBlocks,
 		}
 
 		cs.messages = append(cs.messages, bedrockMsg)
@@ -188,21 +187,210 @@ func (cs *bedrockChat) Initialize(history []*api.Message) error {
 	return nil
 }
 
+// processAPIMessage converts an api.Message to Bedrock content blocks
+func (cs *bedrockChat) processAPIMessage(msg *api.Message) ([]types.ContentBlock, error) {
+	var contentBlocks []types.ContentBlock
+
+	klog.V(2).Infof("Processing message type %s", msg.Type)
+
+	switch msg.Type {
+	case api.MessageTypeText:
+		// Handle text messages
+		if msg.Payload != nil {
+			if textPayload, ok := msg.Payload.(string); ok && textPayload != "" {
+				contentBlocks = append(contentBlocks, &types.ContentBlockMemberText{Value: textPayload})
+				klog.V(2).Infof("Added text content block: %s", textPayload)
+			}
+		}
+
+	case api.MessageTypeToolCallRequest:
+		// Handle tool call requests (assistant messages with tool calls)
+		if msg.Payload != nil {
+			// The payload should contain tool call information
+			// This could be a map with tool call details or a structured object
+			if toolCallData, ok := msg.Payload.(map[string]any); ok {
+				klog.V(2).Infof("Tool call data: %+v", toolCallData)
+				toolUse, err := cs.createToolUseFromPayload(toolCallData)
+				if err != nil {
+					klog.V(2).Infof("Failed to create tool use: %v", err)
+					return nil, fmt.Errorf("failed to create tool use from payload: %w", err)
+				}
+				if toolUse != nil {
+					contentBlocks = append(contentBlocks, &types.ContentBlockMemberToolUse{Value: *toolUse})
+					klog.V(2).Infof("Added tool use content block")
+				}
+			} else {
+				klog.V(2).Infof("Payload is not map[string]any: %T", msg.Payload)
+			}
+		}
+
+	case api.MessageTypeToolCallResponse:
+		// Handle tool call responses (user messages with tool results)
+		if msg.Payload != nil {
+			// The payload should contain tool result information
+			if toolResultData, ok := msg.Payload.(map[string]any); ok {
+				klog.V(2).Infof("Tool result data: %+v", toolResultData)
+				toolResult, err := cs.createToolResultFromPayload(toolResultData)
+				if err != nil {
+					klog.V(2).Infof("Failed to create tool result: %v", err)
+					return nil, fmt.Errorf("failed to create tool result from payload: %w", err)
+				}
+				if toolResult != nil {
+					contentBlocks = append(contentBlocks, &types.ContentBlockMemberToolResult{Value: *toolResult})
+					klog.V(2).Infof("Added tool result content block")
+				}
+			} else {
+				klog.V(2).Infof("Payload is not map[string]any: %T", msg.Payload)
+			}
+		}
+
+	default:
+		// For unknown message types, try to extract text content
+		if msg.Payload != nil {
+			if textPayload, ok := msg.Payload.(string); ok && textPayload != "" {
+				contentBlocks = append(contentBlocks, &types.ContentBlockMemberText{Value: textPayload})
+				klog.V(2).Infof("Added text content block from unknown type: %s", textPayload)
+			}
+		}
+	}
+
+	klog.V(2).Infof("Generated %d content blocks", len(contentBlocks))
+	return contentBlocks, nil
+}
+
+// createToolUseFromPayload creates a ToolUseBlock from payload data
+func (cs *bedrockChat) createToolUseFromPayload(payload map[string]any) (*types.ToolUseBlock, error) {
+	// Extract required fields
+	toolUseID, hasID := payload["id"].(string)
+	if !hasID || toolUseID == "" {
+		return nil, fmt.Errorf("missing or invalid tool use ID")
+	}
+
+	name, hasName := payload["name"].(string)
+	if !hasName || name == "" {
+		return nil, fmt.Errorf("missing or invalid tool name")
+	}
+
+	// Extract arguments
+	var args map[string]any
+	if argsData, hasArgs := payload["arguments"]; hasArgs {
+		if argsMap, ok := argsData.(map[string]any); ok {
+			args = argsMap
+		} else if argsStr, ok := argsData.(string); ok {
+			// Try to parse JSON string
+			if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
+				args = make(map[string]any)
+			}
+		}
+	}
+	if args == nil {
+		args = make(map[string]any)
+	}
+
+	return &types.ToolUseBlock{
+		ToolUseId: aws.String(toolUseID),
+		Name:      aws.String(name),
+		Input:     document.NewLazyDocument(args),
+	}, nil
+}
+
+// createToolResultFromPayload creates a ToolResultBlock from payload data
+func (cs *bedrockChat) createToolResultFromPayload(payload map[string]any) (*types.ToolResultBlock, error) {
+
+	// Extract required fields
+	toolUseID, hasID := payload["id"].(string)
+	if !hasID || toolUseID == "" {
+		return nil, fmt.Errorf("missing or invalid tool use ID")
+	}
+
+	// Extract result content
+	var result map[string]any
+	if resultData, hasResult := payload["result"]; hasResult {
+		if resultMap, ok := resultData.(map[string]any); ok {
+			result = resultMap
+		} else {
+			// Wrap non-map results
+			result = map[string]any{"content": resultData}
+		}
+	}
+	if result == nil {
+		result = make(map[string]any)
+	}
+
+	// Determine status
+	status := types.ToolResultStatusSuccess
+	if statusVal, hasStatus := payload["status"]; hasStatus {
+		if statusStr, ok := statusVal.(string); ok {
+			if statusStr == "error" || statusStr == "failed" {
+				status = types.ToolResultStatusError
+			}
+		}
+	}
+
+	// Create the proper nested structure for tool results
+	// The structure should be: Content[0].Value = {Content: [{Value: resultData}], ToolUseId: "...", Status: "..."}
+	var contentValue map[string]any
+	if result != nil && len(result) > 0 {
+		contentValue = result
+	} else {
+		contentValue = make(map[string]any)
+	}
+
+	// Create the inner content structure with the actual result data
+	innerContent := []map[string]any{
+		{
+			"Value": contentValue,
+		},
+	}
+
+	// Create the outer structure
+	outerValue := map[string]any{
+		"Content":   innerContent,
+		"ToolUseId": toolUseID,
+		"Status":    string(status),
+	}
+
+	toolResult := &types.ToolResultBlock{
+		ToolUseId: aws.String(toolUseID),
+		Content: []types.ToolResultContentBlock{
+			&types.ToolResultContentBlockMemberJson{
+				Value: document.NewLazyDocument(outerValue),
+			},
+		},
+		Status: status,
+	}
+
+	return toolResult, nil
+}
+
 // Send sends a message to the chat and returns the response
 func (c *bedrockChat) Send(ctx context.Context, contents ...any) (ChatResponse, error) {
 	if len(contents) == 0 {
 		return nil, errors.New("no content provided")
 	}
 
-	// Process and append contents to conversation history
-	if err := c.addContentsToHistory(contents); err != nil {
+	// Process contents to conversation history but don't commit yet
+	// Only commit to conversation history when the request succeeds
+	var contentBlocks []types.ContentBlock
+	if err := c.processContents(contents, &contentBlocks); err != nil {
 		return nil, err
 	}
 
-	// Prepare the request
+	// Create a temporary message list that includes the new contents
+	tempMessages := make([]types.Message, len(c.messages))
+	copy(tempMessages, c.messages)
+
+	if len(contentBlocks) > 0 {
+		tempMessages = append(tempMessages, types.Message{
+			Role:    types.ConversationRoleUser,
+			Content: contentBlocks,
+		})
+	}
+
+	// Prepare the request using temporary messages
 	input := &bedrockruntime.ConverseInput{
 		ModelId:  aws.String(c.model),
-		Messages: c.messages,
+		Messages: tempMessages,
 		InferenceConfig: &types.InferenceConfiguration{
 			MaxTokens: aws.Int32(4096),
 		},
@@ -223,7 +411,17 @@ func (c *bedrockChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 	// Call the Bedrock Converse API
 	output, err := c.client.client.Converse(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("bedrock converse error: %w", err)
+		// Wrap AWS SDK errors as APIError when they contain status codes
+		wrappedErr := wrapAWSError(err)
+		return nil, fmt.Errorf("bedrock converse error: %w", wrappedErr)
+	}
+
+	// Only commit to conversation history if the request succeeded
+	if len(contentBlocks) > 0 {
+		c.messages = append(c.messages, types.Message{
+			Role:    types.ConversationRoleUser,
+			Content: contentBlocks,
+		})
 	}
 
 	// Extract response content and update conversation history
@@ -248,15 +446,28 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		return nil, errors.New("no content provided")
 	}
 
-	// Process and append contents to conversation history
-	if err := c.addContentsToHistory(contents); err != nil {
+	// Process contents to conversation history but don't commit yet
+	// Only commit to conversation history when the request succeeds
+	var contentBlocks []types.ContentBlock
+	if err := c.processContents(contents, &contentBlocks); err != nil {
 		return nil, err
 	}
 
-	// Prepare the streaming request
+	// Create a temporary message list that includes the new contents
+	tempMessages := make([]types.Message, len(c.messages))
+	copy(tempMessages, c.messages)
+
+	if len(contentBlocks) > 0 {
+		tempMessages = append(tempMessages, types.Message{
+			Role:    types.ConversationRoleUser,
+			Content: contentBlocks,
+		})
+	}
+
+	// Prepare the streaming request using temporary messages
 	input := &bedrockruntime.ConverseStreamInput{
 		ModelId:  aws.String(c.model),
-		Messages: c.messages,
+		Messages: tempMessages,
 		InferenceConfig: &types.InferenceConfiguration{
 			MaxTokens: aws.Int32(4096),
 		},
@@ -277,7 +488,9 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 	// Start the streaming request
 	output, err := c.client.client.ConverseStream(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("bedrock stream error: %w", err)
+		// Wrap AWS SDK errors as APIError when they contain status codes
+		wrappedErr := wrapAWSError(err)
+		return nil, fmt.Errorf("bedrock stream error: %w", wrappedErr)
 	}
 
 	// Return streaming iterator
@@ -397,6 +610,20 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 			}
 		}
 
+		// Check for stream errors first
+		if err := stream.Err(); err != nil {
+			yield(nil, fmt.Errorf("stream error: %w", err))
+			return
+		}
+
+		// Only commit to conversation history if the streaming succeeded
+		if len(contentBlocks) > 0 {
+			c.messages = append(c.messages, types.Message{
+				Role:    types.ConversationRoleUser,
+				Content: contentBlocks,
+			})
+		}
+
 		// Update conversation history with the full response
 		if fullContent.Len() > 0 {
 			assistantMessage.Content = append(assistantMessage.Content,
@@ -413,36 +640,29 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		if len(assistantMessage.Content) > 0 {
 			c.messages = append(c.messages, assistantMessage)
 		}
-
-		// Check for stream errors
-		if err := stream.Err(); err != nil {
-			yield(nil, fmt.Errorf("stream error: %w", err))
-		}
 	}, nil
 }
 
-// addContentsToHistory processes and appends user messages to chat history
-// following AWS Bedrock Converse API patterns
-func (c *bedrockChat) addContentsToHistory(contents []any) error {
-	var contentBlocks []types.ContentBlock
-
-	for _, content := range contents {
-		switch c := content.(type) {
+// processContents processes contents into content blocks without modifying conversation history
+func (c *bedrockChat) processContents(contents []any, contentBlocks *[]types.ContentBlock) error {
+	for i, content := range contents {
+		_ = i // avoid unused variable
+		switch v := content.(type) {
 		case string:
 			// Add text content block
-			contentBlocks = append(contentBlocks, &types.ContentBlockMemberText{Value: c})
+			*contentBlocks = append(*contentBlocks, &types.ContentBlockMemberText{Value: v})
 		case FunctionCallResult:
 			// Determine status based on Result content
 			status := types.ToolResultStatusSuccess
-			if c.Result != nil {
+			if v.Result != nil {
 				// Check for error field
-				if errorVal, hasError := c.Result["error"]; hasError {
+				if errorVal, hasError := v.Result["error"]; hasError {
 					if errorBool, isBool := errorVal.(bool); isBool && errorBool {
 						status = types.ToolResultStatusError
 					}
 				}
 				// Check for status field
-				if statusVal, hasStatus := c.Result["status"]; hasStatus {
+				if statusVal, hasStatus := v.Result["status"]; hasStatus {
 					if statusStr, isString := statusVal.(string); isString &&
 						(statusStr == "failed" || statusStr == "error") {
 						status = types.ToolResultStatusError
@@ -452,26 +672,26 @@ func (c *bedrockChat) addContentsToHistory(contents []any) error {
 
 			// Convert to AWS Bedrock ToolResultBlock format per official docs
 			toolResult := types.ToolResultBlock{
-				ToolUseId: aws.String(c.ID),
+				ToolUseId: aws.String(v.ID),
 				Content: []types.ToolResultContentBlock{
 					&types.ToolResultContentBlockMemberJson{
-						Value: document.NewLazyDocument(c.Result),
+						Value: document.NewLazyDocument(v.Result),
 					},
 				},
 				Status: status,
 			}
-			contentBlocks = append(contentBlocks, &types.ContentBlockMemberToolResult{Value: toolResult})
+			*contentBlocks = append(*contentBlocks, &types.ContentBlockMemberToolResult{Value: toolResult})
+		case []interface{}:
+			// Process array of content items (e.g., user message with text and tool results)
+			for j, item := range v {
+				// Recursively process each item in the array
+				if err := c.processContents([]any{item}, contentBlocks); err != nil {
+					return fmt.Errorf("failed to process array item %d: %w", j, err)
+				}
+			}
 		default:
 			return fmt.Errorf("unhandled content type: %T", content)
 		}
-	}
-
-	if len(contentBlocks) > 0 {
-		// Add user message with all content blocks to conversation history
-		c.messages = append(c.messages, types.Message{
-			Role:    types.ConversationRoleUser,
-			Content: contentBlocks,
-		})
 	}
 
 	return nil
@@ -514,16 +734,20 @@ func (c *bedrockChat) SetFunctionDefinitions(functions []*FunctionDefinition) er
 
 	c.toolConfig = &types.ToolConfiguration{
 		Tools: tools,
-		ToolChoice: &types.ToolChoiceMemberAny{
-			Value: types.AnyToolChoice{},
+		ToolChoice: &types.ToolChoiceMemberAuto{
+			Value: types.AutoToolChoice{},
 		},
 	}
 
 	return nil
 }
 
-// IsRetryableError determines if an error is retryable
+// IsRetryableError determines if an error is retryable and prints debug info
 func (c *bedrockChat) IsRetryableError(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		fmt.Println("Retrying...")
+	}
 	return DefaultIsRetryableError(err)
 }
 
@@ -721,6 +945,55 @@ func (p *bedrockToolPart) AsFunctionCalls() ([]FunctionCall, bool) {
 }
 
 // Helper functions
+
+// parseAWSError extracts status code and error message from AWS SDK error messages
+// AWS SDK errors typically have the format: "operation error Service: Operation, ... StatusCode: 429, ..."
+func parseAWSError(err error) (statusCode int, message string, hasStatusCode bool) {
+	if err == nil {
+		return 0, "", false
+	}
+
+	errStr := err.Error()
+
+	// Look for StatusCode pattern in the error message
+	re := regexp.MustCompile(`StatusCode:\s*(\d+)`)
+	matches := re.FindStringSubmatch(errStr)
+	if len(matches) > 1 {
+		if code, parseErr := strconv.Atoi(matches[1]); parseErr == nil {
+			// Extract the error message after the status code
+			parts := strings.Split(errStr, "StatusCode:")
+			if len(parts) > 1 {
+				errorPart := strings.TrimSpace(parts[1])
+
+				if statusCodeEnd := strings.Index(errorPart, ","); statusCodeEnd != -1 {
+					errorPart = strings.TrimSpace(errorPart[statusCodeEnd+1:])
+				}
+
+				if colonIndex := strings.Index(errorPart, ":"); colonIndex != -1 {
+					errorPart = strings.TrimSpace(errorPart[colonIndex+1:])
+				}
+				return code, errorPart, true
+			}
+			return code, errStr, true
+		}
+	}
+
+	return 0, errStr, false
+}
+
+// wrapAWSError wraps AWS SDK errors as APIError when they contain status codes
+func wrapAWSError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	statusCode, message, hasStatusCode := parseAWSError(err)
+	if hasStatusCode {
+		return NewAPIError(statusCode, message, err)
+	}
+
+	return err
+}
 
 // getBedrockModel returns the model to use, checking in order:
 // 1. Explicitly provided model

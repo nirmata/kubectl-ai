@@ -180,6 +180,12 @@ func analyzeCall(call *syntax.CallExpr) string {
 		return "unknown"
 	}
 
+	// Check destructive operations first - these always require explicit confirmation
+	if verb == "delete" && !hasDryRun {
+		klog.V(1).Infof("analyzeCall: destructive op for verb=%q subVerb=%q", verb, subVerb)
+		return "yes"
+	}
+
 	// Check standard operations - write operations first (prioritize immediate detection)
 	if (writeOps[verb] || writeSubOps[verb][subVerb]) && !hasDryRun {
 		klog.V(1).Infof("analyzeCall: write op for verb=%q subVerb=%q", verb, subVerb)

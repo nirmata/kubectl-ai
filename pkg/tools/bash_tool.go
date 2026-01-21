@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -142,6 +143,24 @@ func (t *BashTool) CheckModifiesResource(args map[string]any) string {
 
 	if strings.Contains(command, "kubectl") {
 		return kubectlModifiesResource(command)
+	}
+
+	// Detect destructive bash operations
+	commandLower := strings.ToLower(command)
+
+	// Check for file/directory deletion commands
+	if strings.Contains(commandLower, " rm ") || strings.HasPrefix(strings.TrimSpace(commandLower), "rm ") {
+		// Check if it's recursive deletion (more dangerous)
+		if strings.Contains(commandLower, " -r") || strings.Contains(commandLower, " -rf") {
+			klog.V(2).Infof("bash destructiveness: detected rm with -r flag (recursive deletion)")
+			return "yes"
+		}
+		klog.V(2).Infof("bash destructiveness: detected rm (file deletion)")
+		return "yes"
+	}
+	if strings.Contains(commandLower, "rmdir ") {
+		klog.V(2).Infof("bash destructiveness: detected rmdir")
+		return "yes"
 	}
 
 	return "unknown"
