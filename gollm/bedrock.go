@@ -392,7 +392,7 @@ func (c *bedrockChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 		ModelId:  aws.String(c.model),
 		Messages: tempMessages,
 		InferenceConfig: &types.InferenceConfiguration{
-			MaxTokens: aws.Int32(4096),
+			MaxTokens: aws.Int32(8192),
 		},
 	}
 
@@ -469,7 +469,7 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 		ModelId:  aws.String(c.model),
 		Messages: tempMessages,
 		InferenceConfig: &types.InferenceConfiguration{
-			MaxTokens: aws.Int32(4096),
+			MaxTokens: aws.Int32(8192),
 		},
 	}
 
