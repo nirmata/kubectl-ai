@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/agent"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/api"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
+	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/sessions"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/ui"
 	"github.com/charmbracelet/glamour"
 	"golang.org/x/sync/errgroup"
@@ -94,22 +95,39 @@ type HTMLUserInterface struct {
 	httpServer         *http.Server
 	httpServerListener net.Listener
 
-	agent            *agent.Agent
-	journal          journal.Recorder
+	manager         *agent.AgentManager
+	sessionManager  *sessions.SessionManager
+	journal         journal.Recorder
+	defaultModel    string
+	defaultProvider string
+
 	markdownRenderer *glamour.TermRenderer
-	broadcaster      *Broadcaster
+	broadcasters     map[string]*Broadcaster
+	broadcastersMu   sync.Mutex
+
+	broadcasterCancels map[string]context.CancelFunc
+	baseCtx            context.Context
 }
 
 var _ ui.UI = &HTMLUserInterface{}
 
-func NewHTMLUserInterface(agent *agent.Agent, listenAddress string, journal journal.Recorder) (*HTMLUserInterface, error) {
+func NewHTMLUserInterface(manager *agent.AgentManager, sessionManager *sessions.SessionManager, defaultModel, defaultProvider string, listenAddress string, journal journal.Recorder) (*HTMLUserInterface, error) {
 	mux := http.NewServeMux()
 
 	u := &HTMLUserInterface{
-		agent:       agent,
-		journal:     journal,
-		broadcaster: NewBroadcaster(),
+		manager:            manager,
+		sessionManager:     sessionManager,
+		defaultModel:       defaultModel,
+		defaultProvider:    defaultProvider,
+		journal:            journal,
+		broadcasters:       make(map[string]*Broadcaster),
+		broadcasterCancels: make(map[string]context.CancelFunc),
 	}
+
+	// Register callback to listen to new agents
+	manager.SetAgentCreatedCallback(func(a *agent.Agent) {
+		u.ensureAgentListener(a)
+	})
 
 	httpServer := &http.Server{
 		Addr:    listenAddress,
@@ -117,9 +135,13 @@ func NewHTMLUserInterface(agent *agent.Agent, listenAddress string, journal jour
 	}
 
 	mux.HandleFunc("GET /", u.serveIndex)
-	mux.HandleFunc("GET /messages-stream", u.serveMessagesStream)
-	mux.HandleFunc("POST /send-message", u.handlePOSTSendMessage)
-	mux.HandleFunc("POST /choose-option", u.handlePOSTChooseOption)
+	mux.HandleFunc("GET /api/sessions", u.handleListSessions)
+	mux.HandleFunc("POST /api/sessions", u.handleCreateSession)
+	mux.HandleFunc("POST /api/sessions/{id}/rename", u.handleRenameSession)
+	mux.HandleFunc("DELETE /api/sessions/{id}", u.handleDeleteSession)
+	mux.HandleFunc("GET /api/sessions/{id}/stream", u.handleSessionStream)
+	mux.HandleFunc("POST /api/sessions/{id}/send-message", u.handlePOSTSendMessage)
+	mux.HandleFunc("POST /api/sessions/{id}/choose-option", u.handlePOSTChooseOption)
 
 	httpServerListener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
@@ -147,35 +169,7 @@ func NewHTMLUserInterface(agent *agent.Agent, listenAddress string, journal jour
 func (u *HTMLUserInterface) Run(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 
-	// Start the broadcaster
-	g.Go(func() error {
-		u.broadcaster.Run(gctx)
-		return nil
-	})
-
-	// This goroutine listens to agent output and broadcasts it.
-	g.Go(func() error {
-		for {
-			select {
-			case <-gctx.Done():
-				return nil
-			case _, ok := <-u.agent.Output:
-				if !ok {
-					return nil // Channel closed
-				}
-				// We received a message from the agent. It's a signal that
-				// the state has changed. We fetch the entire current state and
-				// broadcast it to all connected clients.
-				jsonData, err := u.getCurrentStateJSON()
-				if err != nil {
-					// Don't return an error, just log it and continue
-					klog.Errorf("Error marshaling state for broadcast: %v", err)
-					continue
-				}
-				u.broadcaster.Broadcast(jsonData)
-			}
-		}
-	})
+	u.baseCtx = gctx
 
 	g.Go(func() error {
 		if err := u.httpServer.Serve(u.httpServerListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -205,9 +199,15 @@ func (u *HTMLUserInterface) serveIndex(w http.ResponseWriter, req *http.Request)
 	w.Write(indexHTML)
 }
 
-func (u *HTMLUserInterface) serveMessagesStream(w http.ResponseWriter, req *http.Request) {
+func (u *HTMLUserInterface) handleSessionStream(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	log := klog.FromContext(ctx)
+
+	id := req.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing session id", http.StatusBadRequest)
+		return
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -220,15 +220,22 @@ func (u *HTMLUserInterface) serveMessagesStream(w http.ResponseWriter, req *http
 	w.Header().Set("Connection", "keep-alive")
 
 	clientChan := make(chan []byte, 10)
-	u.broadcaster.newClient <- clientChan
+	broadcaster := u.getBroadcaster(id)
+	broadcaster.newClient <- clientChan
 	defer func() {
-		u.broadcaster.delClient <- clientChan
+		broadcaster.delClient <- clientChan
 	}()
 
-	log.Info("SSE client connected")
+	log.Info("SSE client connected", "sessionID", id)
 
-	// Immediately send the current state to the new client
-	initialData, err := u.getCurrentStateJSON()
+	agent, err := u.manager.GetAgent(ctx, id)
+	var initialData []byte
+	if err != nil {
+		log.Error(err, "getting agent for session")
+	} else {
+		initialData, err = u.getSessionStateJSON(agent.Session)
+	}
+
 	if err != nil {
 		log.Error(err, "getting initial state for SSE client")
 	} else {
@@ -248,17 +255,137 @@ func (u *HTMLUserInterface) serveMessagesStream(w http.ResponseWriter, req *http
 	}
 }
 
+func (u *HTMLUserInterface) handleListSessions(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	log := klog.FromContext(ctx)
+
+	sessionsList, err := u.manager.ListSessions()
+	if err != nil {
+		log.Error(err, "listing sessions")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(sessionsList); err != nil {
+		log.Error(err, "encoding sessions list")
+	}
+}
+
+func (u *HTMLUserInterface) handleCreateSession(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	log := klog.FromContext(ctx)
+
+	meta := sessions.Metadata{
+		ModelID:    u.defaultModel,
+		ProviderID: u.defaultProvider,
+	}
+
+	session, err := u.sessionManager.NewSession(meta)
+	if err != nil {
+		log.Error(err, "creating new session")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Ensure agent is started/loaded (though mostly for side effect of starting if not started)
+	if _, err := u.manager.GetAgent(ctx, session.ID); err != nil {
+		log.Error(err, "starting agent for new session")
+		// We don't fail the request here necessarily, but it's good to know.
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"id": session.ID})
+}
+
+func (u *HTMLUserInterface) handleRenameSession(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	log := klog.FromContext(ctx)
+
+	id := req.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing session id", http.StatusBadRequest)
+		return
+	}
+
+	if err := req.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	newName := req.FormValue("name")
+	if newName == "" {
+		http.Error(w, "missing name", http.StatusBadRequest)
+		return
+	}
+
+	session, err := u.manager.FindSessionByID(id)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	session.Name = newName
+	if err := u.manager.UpdateLastAccessed(session); err != nil { // UpdateLastAccessed also saves the session
+		log.Error(err, "updating session")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if agent, err := u.manager.GetAgent(ctx, id); err == nil {
+		agent.Session.Name = newName
+		// Broadcast update
+		if data, err := u.getSessionStateJSON(agent.Session); err == nil {
+			u.getBroadcaster(id).Broadcast(data)
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (u *HTMLUserInterface) handleDeleteSession(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	log := klog.FromContext(ctx)
+
+	id := req.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing session id", http.StatusBadRequest)
+		return
+	}
+
+	if err := u.manager.DeleteSession(id); err != nil {
+		log.Error(err, "deleting session")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// If anyone was listening to this session, they should know it's gone.
+	// We can close the broadcaster.
+	u.broadcastersMu.Lock()
+	if cancel, ok := u.broadcasterCancels[id]; ok {
+		cancel()
+		delete(u.broadcasterCancels, id)
+	}
+	delete(u.broadcasters, id)
+	u.broadcastersMu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+}
+
 func (u *HTMLUserInterface) handlePOSTSendMessage(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	log := klog.FromContext(ctx)
+
+	id := req.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing session id", http.StatusBadRequest)
+		return
+	}
 
 	if err := req.ParseForm(); err != nil {
 		log.Error(err, "parsing form")
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	log.Info("got request", "values", req.Form)
 
 	q := req.FormValue("q")
 	if q == "" {
@@ -266,43 +393,35 @@ func (u *HTMLUserInterface) handlePOSTSendMessage(w http.ResponseWriter, req *ht
 		return
 	}
 
+	// Get the agent for this session
+	agent, err := u.manager.GetAgent(ctx, id)
+	if err != nil {
+		log.Error(err, "getting agent")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	// Send the message to the agent
-	u.agent.Input <- &api.UserInputResponse{Query: q}
+	agent.Input <- &api.UserInputResponse{Query: q}
 
 	w.WriteHeader(http.StatusOK)
-}
-
-func (u *HTMLUserInterface) getCurrentStateJSON() ([]byte, error) {
-	allMessages := u.agent.Session().AllMessages()
-	// Create a copy of the messages to avoid race conditions
-	var messages []*api.Message
-	for _, message := range allMessages {
-		if message.Type == api.MessageTypeUserInputRequest && message.Payload == ">>>" {
-			continue
-		}
-		messages = append(messages, message)
-	}
-
-	agentState := u.agent.Session().AgentState
-
-	data := map[string]interface{}{
-		"messages":   messages,
-		"agentState": agentState,
-	}
-	return json.Marshal(data)
 }
 
 func (u *HTMLUserInterface) handlePOSTChooseOption(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	log := klog.FromContext(ctx)
 
+	id := req.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing session id", http.StatusBadRequest)
+		return
+	}
+
 	if err := req.ParseForm(); err != nil {
 		log.Error(err, "parsing form")
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	log.Info("got request", "values", req.Form)
 
 	choice := req.FormValue("choice")
 	if choice == "" {
@@ -316,8 +435,15 @@ func (u *HTMLUserInterface) handlePOSTChooseOption(w http.ResponseWriter, req *h
 		return
 	}
 
+	// Get the agent
+	agent, err := u.manager.GetAgent(ctx, id)
+	if err != nil {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
 	// Send the choice to the agent
-	u.agent.Input <- &api.UserChoiceResponse{Choice: choiceIndex}
+	agent.Input <- &api.UserChoiceResponse{Choice: choiceIndex}
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -331,9 +457,84 @@ func (u *HTMLUserInterface) Close() error {
 			u.httpServerListener = nil
 		}
 	}
+
+	u.broadcastersMu.Lock()
+	for id, cancel := range u.broadcasterCancels {
+		cancel()
+		delete(u.broadcasterCancels, id)
+	}
+	u.broadcasters = make(map[string]*Broadcaster)
+	u.broadcastersMu.Unlock()
+
 	return errors.Join(errs...)
 }
 
 func (u *HTMLUserInterface) ClearScreen() {
 	// Not applicable for HTML UI
+}
+
+func (u *HTMLUserInterface) getSessionStateJSON(session *api.Session) ([]byte, error) {
+	allMessages := session.AllMessages()
+	// Create a copy of the messages to avoid race conditions
+	var messages []*api.Message
+	for _, message := range allMessages {
+		if message.Type == api.MessageTypeUserInputRequest && message.Payload == ">>>" {
+			continue
+		}
+		messages = append(messages, message)
+	}
+
+	agentState := session.AgentState
+
+	data := map[string]interface{}{
+		"messages":   messages,
+		"agentState": agentState,
+		"sessionId":  session.ID,
+	}
+	return json.Marshal(data)
+}
+
+func (u *HTMLUserInterface) getBroadcaster(sessionID string) *Broadcaster {
+	u.broadcastersMu.Lock()
+	defer u.broadcastersMu.Unlock()
+
+	if b, ok := u.broadcasters[sessionID]; ok {
+		return b
+	}
+
+	b := NewBroadcaster()
+	u.broadcasters[sessionID] = b
+
+	parent := u.baseCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	u.broadcasterCancels[sessionID] = cancel
+
+	// Start the broadcaster loop
+	go b.Run(ctx)
+
+	return b
+}
+
+func (u *HTMLUserInterface) ensureAgentListener(a *agent.Agent) {
+	// Start a goroutine to listen to this agent's output
+	go func() {
+		for range a.Output {
+			// Broadcast state
+			if a.Session == nil {
+				continue
+			}
+
+			data, err := u.getSessionStateJSON(a.Session)
+			if err != nil {
+				klog.Errorf("Error marshaling state for broadcast: %v", err)
+				continue
+			}
+
+			b := u.getBroadcaster(a.Session.ID)
+			b.Broadcast(data)
+		}
+	}()
 }

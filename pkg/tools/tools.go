@@ -21,12 +21,14 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
+	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/sandbox"
 	"github.com/google/uuid"
 	"sigs.k8s.io/yaml"
 )
@@ -37,6 +39,7 @@ const (
 	KubeconfigKey  ContextKey = "kubeconfig"
 	WorkDirKey     ContextKey = "work_dir"
 	AllowedDirsKey ContextKey = "allowed_dirs"
+	ExecutorKey    ContextKey = "executor"
 )
 
 func Lookup(name string) Tool {
@@ -94,6 +97,25 @@ func (t *Tools) RegisterTool(tool Tool) {
 		panic("tool already registered: " + name)
 	}
 	t.tools[name] = tool
+}
+
+// CloneWithExecutor creates a shallow copy of the Tools collection,
+// but clones any tools that need a session-specific executor (like CustomTool).
+func (t *Tools) CloneWithExecutor(executor sandbox.Executor) Tools {
+	newTools := Tools{
+		tools: make(map[string]Tool),
+	}
+
+	for name, tool := range t.tools {
+		// If it's a CustomTool, we need to clone it with the session-specific executor
+		if ct, ok := tool.(*CustomTool); ok {
+			newTools.tools[name] = ct.CloneWithExecutor(executor)
+		} else {
+			// For other tools (like MCP tools), we reuse the existing instance
+			newTools.tools[name] = tool
+		}
+	}
+	return newTools
 }
 
 type ToolCall struct {
@@ -155,6 +177,9 @@ type InvokeToolOptions struct {
 
 	// AllowedDirs is a list of directories that are allowed for file operations.
 	AllowedDirs []string
+
+	// Executor is the executor for tool execution
+	Executor sandbox.Executor
 }
 
 type ToolRequestEvent struct {
@@ -188,6 +213,9 @@ func (t *ToolCall) InvokeTool(ctx context.Context, opt InvokeToolOptions) (any, 
 	ctx = context.WithValue(ctx, WorkDirKey, opt.WorkDir)
 	if opt.AllowedDirs != nil {
 		ctx = context.WithValue(ctx, AllowedDirsKey, opt.AllowedDirs)
+	}
+	if opt.Executor != nil {
+		ctx = context.WithValue(ctx, ExecutorKey, opt.Executor)
 	}
 
 	response, err := t.tool.Run(ctx, t.arguments)
@@ -304,4 +332,39 @@ func (t *CustomTool) IsInteractive(args map[string]any) (bool, error) {
 // Add a method to access the tool
 func (t *ToolCall) GetTool() Tool {
 	return t.tool
+}
+
+// ExpandShellVar expands shell variables and syntax using bash
+func ExpandShellVar(value string) (string, error) {
+	if strings.Contains(value, "~") {
+		if len(value) >= 2 && value[0] == '~' && os.IsPathSeparator(value[1]) {
+			if runtime.GOOS == "windows" {
+				value = filepath.Join(os.Getenv("USERPROFILE"), value[2:])
+			} else {
+				value = filepath.Join(os.Getenv("HOME"), value[2:])
+			}
+		}
+	}
+	return os.ExpandEnv(value), nil
+}
+
+func IsInteractiveCommand(command string) (bool, error) {
+	// Inline isKubectlCommand logic
+	words := strings.Fields(command)
+	if len(words) == 0 {
+		return false, nil
+	}
+	base := filepath.Base(words[0])
+	if base != "kubectl" {
+		return false, nil
+	}
+
+	isExec := strings.Contains(command, " exec ") && strings.Contains(command, " -it")
+	isPortForward := strings.Contains(command, " port-forward ")
+	isEdit := strings.Contains(command, " edit ")
+
+	if isExec || isPortForward || isEdit {
+		return true, fmt.Errorf("interactive mode not supported for kubectl, please use non-interactive commands")
+	}
+	return false, nil
 }

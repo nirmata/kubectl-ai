@@ -15,19 +15,22 @@
 package api
 
 import (
+	"fmt"
 	"time"
 )
 
 type Session struct {
-	ID           string
-	Messages     []*Message
-	AgentState   AgentState
-	CreatedAt    time.Time
-	LastModified time.Time
+	ID               string
+	Name             string
+	ProviderID       string
+	ModelID          string
+	Messages         []*Message
+	AgentState       AgentState
+	CreatedAt        time.Time
+	LastModified     time.Time
+	ChatMessageStore ChatMessageStore
 	// MCP status information
 	MCPStatus *MCPStatus
-	// ChatMessageStore is an interface that allows the session to store and retrieve chat messages.
-	ChatMessageStore ChatMessageStore
 }
 
 type AgentState string
@@ -44,14 +47,16 @@ const (
 type MessageType string
 
 const (
-	MessageTypeText               MessageType = "text"
-	MessageTypeError              MessageType = "error"
-	MessageTypeToolCallRequest    MessageType = "tool-call-request"
-	MessageTypeToolCallResponse   MessageType = "tool-call-response"
-	MessageTypeUserInputRequest   MessageType = "user-input-request"
-	MessageTypeUserInputResponse  MessageType = "user-input-response"
-	MessageTypeUserChoiceRequest  MessageType = "user-choice-request"
-	MessageTypeUserChoiceResponse MessageType = "user-choice-response"
+	MessageTypeText                  MessageType = "text"
+	MessageTypeError                 MessageType = "error"
+	MessageTypeToolCallRequest       MessageType = "tool-call-request"
+	MessageTypeToolCallResponse      MessageType = "tool-call-response"
+	MessageTypeUserInputRequest      MessageType = "user-input-request"
+	MessageTypeUserInputResponse     MessageType = "user-input-response"
+	MessageTypeUserChoiceRequest     MessageType = "user-choice-request"
+	MessageTypeUserChoiceResponse    MessageType = "user-choice-response"
+	MessageTypeSessionPickerRequest  MessageType = "session-picker-request"
+	MessageTypeSessionPickerResponse MessageType = "session-picker-response"
 )
 
 type Message struct {
@@ -89,6 +94,28 @@ type UserInputResponse struct {
 	Query string `json:"query"`
 }
 
+// SessionPickerRequest is sent to show an interactive session picker
+type SessionPickerRequest struct {
+	Sessions []SessionInfo `json:"sessions"`
+}
+
+// SessionInfo contains display information for a session
+type SessionInfo struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name,omitempty"`
+	ModelID      string    `json:"modelId,omitempty"`
+	ProviderID   string    `json:"providerId,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	LastModified time.Time `json:"lastModified"`
+	MessageCount int       `json:"messageCount"`
+}
+
+// SessionPickerResponse is sent when user selects a session
+type SessionPickerResponse struct {
+	SessionID string `json:"sessionId"`
+	Cancelled bool   `json:"cancelled"`
+}
+
 // MCPStatus represents the overall status of MCP servers and tools
 type MCPStatus struct {
 	ServerInfoList []ServerConnectionInfo `json:"serverInfoList,omitempty"`
@@ -124,5 +151,13 @@ type ChatMessageStore interface {
 }
 
 func (s *Session) AllMessages() []*Message {
+	if s.ChatMessageStore == nil {
+		return nil
+	}
 	return s.ChatMessageStore.ChatMessages()
+}
+
+func (s *Session) String() string {
+	return fmt.Sprintf("Session ID: %s\nProvider: %s\nModel: %s\nCreated At: %s\nLast Modified: %s\nAgent State: %s",
+		s.ID, s.ProviderID, s.ModelID, s.CreatedAt.Format(time.RFC3339), s.LastModified.Format(time.RFC3339), s.AgentState)
 }

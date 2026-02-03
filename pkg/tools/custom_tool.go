@@ -18,10 +18,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/gollm"
+	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/sandbox"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -36,7 +36,8 @@ type CustomToolConfig struct {
 
 // CustomTool implements the Tool interface for external commands.
 type CustomTool struct {
-	config CustomToolConfig
+	config   CustomToolConfig
+	executor sandbox.Executor
 }
 
 // NewCustomTool creates a new CustomTool instance.
@@ -48,7 +49,7 @@ func NewCustomTool(config CustomToolConfig) (*CustomTool, error) {
 		return nil, fmt.Errorf("custom tool command cannot be empty for tool %q", config.Name)
 	}
 
-	return &CustomTool{config: config}, nil
+	return &CustomTool{config: config, executor: nil}, nil
 }
 
 // Name returns the tool's name.
@@ -137,12 +138,13 @@ func (t *CustomTool) Run(ctx context.Context, args map[string]any) (any, error) 
 	}
 
 	workDir := ctx.Value(WorkDirKey).(string)
+	env := os.Environ()
 
-	// Validate file paths in shell commands against allowed directories
+	// Validate file paths in shell commands against allowed directories (nirmata branch)
 	if allowedDirsValue := ctx.Value(AllowedDirsKey); allowedDirsValue != nil {
 		if allowedDirs, ok := allowedDirsValue.([]string); ok && len(allowedDirs) > 0 {
 			if err := validateShellCommandPaths(command, workDir, allowedDirs); err != nil {
-				return &ExecResult{
+				return &sandbox.ExecResult{
 					Command: command,
 					Error:   err.Error(),
 				}, nil
@@ -150,11 +152,14 @@ func (t *CustomTool) Run(ctx context.Context, args map[string]any) (any, error) 
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, lookupBashBin(), "-c", command)
-	cmd.Dir = workDir
-	cmd.Env = os.Environ()
+	// Use the injected executor, or fallback to local if not set (e.g. for global instance)
+	executor := t.executor
+	if executor == nil {
+		executor = sandbox.NewLocalExecutor()
+	}
 
-	return executeCommand(ctx, cmd)
+	// Execute the command
+	return executor.Execute(ctx, command, env, workDir)
 }
 
 // CheckModifiesResource determines if the command modifies resources
@@ -164,4 +169,13 @@ func (t *CustomTool) Run(ctx context.Context, args map[string]any) (any, error) 
 func (t *CustomTool) CheckModifiesResource(args map[string]any) string {
 	// For custom tools, we'll conservatively use "unknown" since we can't
 	return "unknown"
+}
+
+// CloneWithExecutor creates a copy of the CustomTool with the given executor.
+// This is used to create a session-specific instance of the tool.
+func (t *CustomTool) CloneWithExecutor(executor sandbox.Executor) *CustomTool {
+	return &CustomTool{
+		config:   t.config,
+		executor: executor,
+	}
 }

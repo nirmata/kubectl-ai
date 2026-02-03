@@ -17,175 +17,91 @@ package sessions
 import (
 	"fmt"
 	"math/rand"
-	"os"
-	"path/filepath"
-	"sort"
 	"time"
 
-	"k8s.io/klog/v2"
+	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/api"
 )
 
-const (
-	sessionsDirName = "sessions"
-	timeFormat      = "20060102"
-)
-
-// SessionManager manages the chat sessions.
 type SessionManager struct {
-	BasePath string
+	store Store
 }
 
-// NewSessionManager creates a new SessionManager.
-func NewSessionManager() (*SessionManager, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	basePath := filepath.Join(homeDir, ".kubectl-ai", sessionsDirName)
-	if err := os.MkdirAll(basePath, 0755); err != nil {
-		return nil, err
-	}
-	return &SessionManager{
-		BasePath: basePath,
-	}, nil
-}
+func NewSessionManager(backend string) (*SessionManager, error) {
+	var store Store
+	var err error
 
-// NewSession creates a new session.
-func (sm *SessionManager) NewSession(meta Metadata) (*Session, error) {
-	// Generate a unique session ID with date prefix and random suffix
-	// Keep trying until we find a unique ID
-	var sessionID string
-	var sessionPath string
-	maxAttempts := 100 // Prevent infinite loop
-
-	for i := 0; i < maxAttempts; i++ {
-		suffix := fmt.Sprintf("%04d", rand.Intn(1000))
-		candidateID := time.Now().Format(timeFormat) + "-" + suffix
-		candidatePath := filepath.Join(sm.BasePath, candidateID)
-
-		// Check if this session ID already exists
-		if _, err := os.Stat(candidatePath); os.IsNotExist(err) {
-			sessionID = candidateID
-			sessionPath = candidatePath
-			break
-		}
-	}
-
-	if sessionID == "" {
-		return nil, fmt.Errorf("failed to generate unique session ID after %d attempts", maxAttempts)
-	}
-
-	if err := os.MkdirAll(sessionPath, 0755); err != nil {
-		return nil, err
-	}
-
-	s := &Session{
-		ID:   sessionID,
-		Path: sessionPath,
-	}
-
-	// Set creation and last accessed times
-	meta.CreatedAt = time.Now()
-	meta.LastAccessed = time.Now()
-
-	if err := s.SaveMetadata(&meta); err != nil {
-		return nil, err
-	}
-	return s, nil
-}
-
-// ListSessions lists all the sessions.
-func (sm *SessionManager) ListSessions() ([]*Session, error) {
-	entries, err := os.ReadDir(sm.BasePath)
-	if err != nil {
-		return nil, err
-	}
-
-	var sessions []*Session
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		sessions = append(sessions, &Session{
-			ID:   entry.Name(),
-			Path: filepath.Join(sm.BasePath, entry.Name()),
-		})
-	}
-
-	// Sort sessions by name, which will sort by date (newest first)
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].ID > sessions[j].ID
-	})
-
-	return sessions, nil
-}
-
-// GetLatestSession returns the latest session
-func (sm *SessionManager) GetLatestSession() (*Session, error) {
-	sessions, err := sm.ListSessions()
-	if err != nil {
-		return nil, err
-	}
-	if len(sessions) == 0 {
-		return nil, nil // No sessions found
-	}
-
-	var latestSession *Session
-	var latestTime time.Time
-
-	// TODO: LoadMetadata() reads from filesystem, if this is too costly, we
-	// can come up with a different solution.
-	for _, s := range sessions {
-		meta, err := s.LoadMetadata()
+	if backend == "" {
+		// Try filesystem first
+		store, err = NewStore("filesystem")
 		if err != nil {
-			// Warn in case a metadata is corrupted
-			klog.Warningf("could not load metadata for session %s: %v", s.ID, err)
-			continue
+			// Fallback to memory
+			store, err = NewStore("memory")
 		}
-		if latestSession == nil || meta.LastAccessed.After(latestTime) {
-			latestSession = s
-			latestTime = meta.LastAccessed
-		}
+	} else {
+		store, err = NewStore(backend)
 	}
 
-	return latestSession, nil
-}
-
-// FindSessionByID finds a session by its ID.
-func (sm *SessionManager) FindSessionByID(id string) (*Session, error) {
-	sessions, err := sm.ListSessions()
 	if err != nil {
 		return nil, err
 	}
-	for _, s := range sessions {
-		if s.ID == id {
-			return s, nil
+	return &SessionManager{store: store}, nil
+}
+
+func (sm *SessionManager) NewSession(meta Metadata) (*api.Session, error) {
+	suffix := fmt.Sprintf("%04d", rand.Intn(10000))
+	sessionID := time.Now().Format("20060102") + "-" + suffix
+
+	now := time.Now()
+	session := &api.Session{
+		ID:           sessionID,
+		Name:         "Session " + sessionID,
+		ProviderID:   meta.ProviderID,
+		ModelID:      meta.ModelID,
+		AgentState:   api.AgentStateIdle,
+		CreatedAt:    now,
+		LastModified: now,
+	}
+
+	if err := sm.store.CreateSession(session); err != nil {
+		return nil, err
+	}
+
+	return session, nil
+}
+
+func (sm *SessionManager) ListSessions() ([]*api.Session, error) {
+	return sm.store.ListSessions()
+}
+
+func (sm *SessionManager) FindSessionByID(id string) (*api.Session, error) {
+	return sm.store.GetSession(id)
+}
+
+func (sm *SessionManager) DeleteSession(id string) error {
+	return sm.store.DeleteSession(id)
+}
+
+func (sm *SessionManager) GetLatestSession() (*api.Session, error) {
+	sessions, err := sm.store.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+
+	latest := sessions[0]
+	for _, session := range sessions[1:] {
+		if session.LastModified.After(latest.LastModified) {
+			latest = session
 		}
 	}
-	return nil, fmt.Errorf("session with ID %q not found", id)
+
+	return latest, nil
 }
 
-// DeleteSession deletes a session and all its data.
-func (sm *SessionManager) DeleteSession(id string) error {
-	session, err := sm.FindSessionByID(id)
-	if err != nil {
-		return err
-	}
-
-	return os.RemoveAll(session.Path)
-}
-
-// GetSessionInfo returns detailed information about a session including metadata.
-func (sm *SessionManager) GetSessionInfo(id string) (*Session, *Metadata, error) {
-	session, err := sm.FindSessionByID(id)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	meta, err := session.LoadMetadata()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return session, meta, nil
+func (sm *SessionManager) UpdateLastAccessed(session *api.Session) error {
+	session.LastModified = time.Now()
+	return sm.store.UpdateSession(session)
 }
