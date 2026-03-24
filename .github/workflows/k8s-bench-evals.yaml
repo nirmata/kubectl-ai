@@ -37,7 +37,7 @@ jobs:
             echo "Error: You must provide a specific task name or pattern. Wildcards or empty values are not allowed."
             exit 1
           fi
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Kind Cluster Setup
         uses: ./.github/actions/kind-cluster-setup
         with:
