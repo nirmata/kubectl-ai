@@ -47,7 +47,7 @@ func buildRequest(chat *anthropicChat, stream bool) anthropicRequest {
 			Role:    "user",
 			Content: []anthropicContentBlock{{Type: "text", Text: "test"}},
 		}},
-		Stream:    stream,
+		Stream: stream,
 	}
 	chat.applyThinkingConfig(&req)
 	return req
@@ -98,12 +98,12 @@ func TestAnthropic_NoThinkingEffort_ZeroBehaviorChange(t *testing.T) {
 // TestAnthropic_ThinkingEffort_LockstepSendAndStreaming is the load-bearing
 // wire-format correctness test. With WithThinkingEffort("medium"):
 //
-//   1. Both the non-streaming (Stream:false) and streaming (Stream:true)
-//      request bodies must include the thinking and output_config fields.
-//   2. The two code paths must produce IDENTICAL thinking/output_config
-//      content (after stripping the Stream field difference). If they ever
-//      diverge, callers get inconsistent thinking behavior depending on
-//      whether they happen to use streaming.
+//  1. Both the non-streaming (Stream:false) and streaming (Stream:true)
+//     request bodies must include the thinking and output_config fields.
+//  2. The two code paths must produce IDENTICAL thinking/output_config
+//     content (after stripping the Stream field difference). If they ever
+//     diverge, callers get inconsistent thinking behavior depending on
+//     whether they happen to use streaming.
 //
 // If this test breaks, the on-the-wire JSON to Anthropic changed for one
 // path but not the other.
@@ -276,4 +276,3 @@ func TestAnthropic_ThinkingEffort_PersistsAcrossTurns(t *testing.T) {
 		}
 	}
 }
-
