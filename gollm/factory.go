@@ -55,6 +55,9 @@ func (r *registry) listProviders() []string {
 type ClientOptions struct {
 	URL           *url.URL
 	SkipVerifySSL bool
+	// Honored by anthropic only; ignored elsewhere. Validated by the
+	// provider factory — see WithThinkingEffort for accepted values.
+	ThinkingEffort string
 	// Extend with more options as needed
 }
 
@@ -65,6 +68,15 @@ type Option func(*ClientOptions)
 func WithSkipVerifySSL() Option {
 	return func(o *ClientOptions) {
 		o.SkipVerifySSL = true
+	}
+}
+
+// WithThinkingEffort sets the anthropic-provider extended-thinking effort
+// for Claude Sonnet 4.6+. Accepted: "" or "off" (no thinking), "low",
+// "medium", "high", "max". Invalid values fail NewClient at startup.
+func WithThinkingEffort(effort string) Option {
+	return func(o *ClientOptions) {
+		o.ThinkingEffort = effort
 	}
 }
 
