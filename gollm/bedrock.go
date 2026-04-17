@@ -34,10 +34,18 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// Register the Bedrock provider factory on package initialization
+var bedrockPromptCaching bool
+
 func init() {
 	if err := RegisterProvider("bedrock", newBedrockClientFactory); err != nil {
 		klog.Fatalf("Failed to register bedrock provider: %v", err)
+	}
+
+	// Prompt caching defaults to true; set BEDROCK_PROMPT_CACHING=false to disable
+	if v := os.Getenv("BEDROCK_PROMPT_CACHING"); v == "false" {
+		bedrockPromptCaching = false
+	} else {
+		bedrockPromptCaching = true
 	}
 }
 
@@ -99,10 +107,11 @@ func (c *BedrockClient) StartChat(systemPrompt, model string) Chat {
 	}
 
 	return &bedrockChat{
-		client:       c,
-		systemPrompt: enhancedPrompt,
-		model:        selectedModel,
-		messages:     []types.Message{},
+		client:        c,
+		systemPrompt:  enhancedPrompt,
+		model:         selectedModel,
+		messages:      []types.Message{},
+		promptCaching: bedrockPromptCaching,
 	}
 }
 
@@ -135,12 +144,13 @@ func (c *BedrockClient) ListModels(ctx context.Context) ([]string, error) {
 
 // bedrockChat implements the Chat interface for Bedrock conversations
 type bedrockChat struct {
-	client       *BedrockClient
-	systemPrompt string
-	model        string
-	messages     []types.Message
-	toolConfig   *types.ToolConfiguration
-	functionDefs []*FunctionDefinition
+	client        *BedrockClient
+	systemPrompt  string
+	model         string
+	messages      []types.Message
+	toolConfig    *types.ToolConfiguration
+	functionDefs  []*FunctionDefinition
+	promptCaching bool
 }
 
 func (cs *bedrockChat) Initialize(history []*api.Message) error {
@@ -398,9 +408,15 @@ func (c *bedrockChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 
 	// Add system prompt if provided
 	if c.systemPrompt != "" {
-		input.System = []types.SystemContentBlock{
+		sysBlocks := []types.SystemContentBlock{
 			&types.SystemContentBlockMemberText{Value: c.systemPrompt},
 		}
+		if c.promptCaching {
+			sysBlocks = append(sysBlocks, &types.SystemContentBlockMemberCachePoint{
+				Value: types.CachePointBlock{Type: types.CachePointTypeDefault},
+			})
+		}
+		input.System = sysBlocks
 	}
 
 	// Add tool configuration if functions are defined
@@ -475,9 +491,15 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 
 	// Add system prompt if provided
 	if c.systemPrompt != "" {
-		input.System = []types.SystemContentBlock{
+		sysBlocks := []types.SystemContentBlock{
 			&types.SystemContentBlockMemberText{Value: c.systemPrompt},
 		}
+		if c.promptCaching {
+			sysBlocks = append(sysBlocks, &types.SystemContentBlockMemberCachePoint{
+				Value: types.CachePointBlock{Type: types.CachePointTypeDefault},
+			})
+		}
+		input.System = sysBlocks
 	}
 
 	// Add tool configuration if functions are defined
@@ -730,6 +752,12 @@ func (c *bedrockChat) SetFunctionDefinitions(functions []*FunctionDefinition) er
 		}
 
 		tools = append(tools, &types.ToolMemberToolSpec{Value: toolSpec})
+	}
+
+	if c.promptCaching {
+		tools = append(tools, &types.ToolMemberCachePoint{
+			Value: types.CachePointBlock{Type: types.CachePointTypeDefault},
+		})
 	}
 
 	c.toolConfig = &types.ToolConfiguration{
