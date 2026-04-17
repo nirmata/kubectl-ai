@@ -194,6 +194,24 @@ func (cs *bedrockChat) Initialize(history []*api.Message) error {
 		cs.messages = append(cs.messages, bedrockMsg)
 	}
 
+	// Bedrock's Converse API requires strictly alternating user/assistant turns.
+	// Parallel tool calls from a single assistant turn arrive here as multiple
+	// separate messages (one per tool_use or tool_result); collapse any run of
+	// consecutive same-role messages into one so tool_use and tool_result blocks
+	// stay paired within their original turn.
+	if len(cs.messages) > 1 {
+		merged := cs.messages[:1]
+		for _, msg := range cs.messages[1:] {
+			last := &merged[len(merged)-1]
+			if msg.Role == last.Role {
+				last.Content = append(last.Content, msg.Content...)
+				continue
+			}
+			merged = append(merged, msg)
+		}
+		cs.messages = merged
+	}
+
 	return nil
 }
 
