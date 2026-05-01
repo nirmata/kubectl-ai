@@ -614,12 +614,8 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 							continue
 						}
 					} else {
-						klog.Errorf("Tool %q: content block completed with no input deltas (expected at least '{}')", partial.name)
-						if !yield(nil, fmt.Errorf("tool %q: no input deltas received", partial.name)) {
-							return
-						}
-						delete(partialTools, idx)
-						continue
+						klog.V(2).Infof("Tool %q: content block completed with empty input", partial.name)
+						args = make(map[string]any)
 					}
 
 					// Create ToolUseBlock for conversation history
