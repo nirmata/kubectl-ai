@@ -606,9 +606,15 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 					var args map[string]any
 					if inputJSON != "" {
 						if err := json.Unmarshal([]byte(inputJSON), &args); err != nil {
-							args = make(map[string]any)
+							klog.Errorf("Tool %q: failed to unmarshal input JSON: %v (raw: %s)", partial.name, err, inputJSON)
+							if !yield(nil, fmt.Errorf("tool %q input JSON unmarshal failed: %w", partial.name, err)) {
+								return
+							}
+							delete(partialTools, idx)
+							continue
 						}
 					} else {
+						klog.V(2).Infof("Tool %q: content block completed with empty input", partial.name)
 						args = make(map[string]any)
 					}
 
@@ -974,7 +980,7 @@ func (p *bedrockToolPart) AsFunctionCalls() ([]FunctionCall, bool) {
 	} else if p.toolUse.Input != nil {
 		// Non-streaming case - unmarshal from Input
 		if err := p.toolUse.Input.UnmarshalSmithyDocument(&args); err != nil {
-			klog.V(2).Infof("Failed to unmarshal tool input: %v", err)
+			klog.Errorf("Tool %q: failed to unmarshal input: %v", aws.ToString(p.toolUse.Name), err)
 			args = make(map[string]any)
 		}
 	} else {
