@@ -39,7 +39,31 @@ const (
 	defaultAnthropicBaseURL = "https://api.anthropic.com"
 	defaultAnthropicModel   = "claude-sonnet-4-20250514"
 	anthropicAPIVersion     = "2023-06-01"
+
+	// On Sonnet 4.6+, Anthropic deprecated `enabled` (with budget_tokens) in
+	// favor of `adaptive` where the model decides per-request. We only ship
+	// `adaptive`.
+	thinkingTypeAdaptive = "adaptive"
+
+	// Preserved at the pre-thinking value so non-thinking callers see
+	// byte-identical request bodies.
+	defaultMaxTokens = 4096
+
+	// Adaptive thinking can spend significant output tokens on reasoning;
+	// higher cap avoids silent truncation. max_tokens is a cap, not a
+	// target — no extra cost when responses are short.
+	defaultMaxTokensThinking = 8192
 )
+
+// "" and "off" are equivalent (Anthropic treats omission as disabled).
+var validThinkingEfforts = map[string]bool{
+	"":       true,
+	"off":    true,
+	"low":    true,
+	"medium": true,
+	"high":   true,
+	"max":    true,
+}
 
 // Registers the Anthropic provider factory on package initialization
 func init() {
@@ -55,9 +79,10 @@ func newAnthropicClientFactory(ctx context.Context, opts ClientOptions) (Client,
 
 // Implements the gollm.Client interface for Anthropic Claude models via HTTP
 type AnthropicClient struct {
-	baseURL    *url.URL
-	httpClient *http.Client
-	apiKey     string
+	baseURL        *url.URL
+	httpClient     *http.Client
+	apiKey         string
+	thinkingEffort string // validated in NewAnthropicClient
 }
 
 var _ Client = &AnthropicClient{}
@@ -68,6 +93,14 @@ func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClie
 	if apiKey == "" {
 		klog.Errorf("ANTHROPIC_API_KEY environment variable not set")
 		return nil, fmt.Errorf("%s environment variable not set", envAnthropicAPIKey)
+	}
+
+	// Fail-fast: catch typos at startup, not in per-request errors.
+	if !validThinkingEfforts[opts.ThinkingEffort] {
+		return nil, fmt.Errorf(
+			"invalid ThinkingEffort %q: must be one of \"\" (unset), \"off\", \"low\", \"medium\", \"high\", or \"max\"",
+			opts.ThinkingEffort,
+		)
 	}
 
 	// Get base URL
@@ -92,9 +125,10 @@ func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClie
 	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
 
 	client := &AnthropicClient{
-		baseURL:    baseURL,
-		httpClient: httpClient,
-		apiKey:     apiKey,
+		baseURL:        baseURL,
+		httpClient:     httpClient,
+		apiKey:         apiKey,
+		thinkingEffort: opts.ThinkingEffort,
 	}
 
 	return client, nil
@@ -108,10 +142,11 @@ func (c *AnthropicClient) StartChat(systemPrompt, model string) Chat {
 	selectedModel := getAnthropicModel(model)
 
 	chat := &anthropicChat{
-		client:       c,
-		systemPrompt: systemPrompt,
-		model:        selectedModel,
-		messages:     []anthropicMessage{},
+		client:         c,
+		systemPrompt:   systemPrompt,
+		model:          selectedModel,
+		messages:       []anthropicMessage{},
+		thinkingEffort: c.thinkingEffort,
 	}
 
 	return chat
@@ -235,6 +270,17 @@ type anthropicRequest struct {
 	Tools       []anthropicTool    `json:"tools,omitempty"`
 	Stream      bool               `json:"stream,omitempty"`
 	Temperature *float64           `json:"temperature,omitempty"`
+	// Set together by applyThinkingConfig or both nil; never half-set.
+	Thinking     *anthropicThinking     `json:"thinking,omitempty"`
+	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
+}
+
+type anthropicThinking struct {
+	Type string `json:"type"`
+}
+
+type anthropicOutputConfig struct {
+	Effort string `json:"effort"`
 }
 
 type anthropicTool struct {
@@ -278,12 +324,25 @@ type anthropicError struct {
 }
 
 type anthropicChat struct {
-	client       *AnthropicClient
-	systemPrompt string
-	model        string
-	messages     []anthropicMessage
-	tools        []anthropicTool
-	functionDefs []*FunctionDefinition
+	client         *AnthropicClient
+	systemPrompt   string
+	model          string
+	messages       []anthropicMessage
+	tools          []anthropicTool
+	functionDefs   []*FunctionDefinition
+	thinkingEffort string // inherited from client; validated at client construction
+}
+
+// applyThinkingConfig must be called from both Send and SendStreaming to
+// keep streaming and non-streaming wire payloads identical. All three
+// mutations happen together or none — there's no half-set state.
+func (c *anthropicChat) applyThinkingConfig(req *anthropicRequest) {
+	if c.thinkingEffort == "" || c.thinkingEffort == "off" {
+		return
+	}
+	req.MaxTokens = defaultMaxTokensThinking
+	req.Thinking = &anthropicThinking{Type: thinkingTypeAdaptive}
+	req.OutputConfig = &anthropicOutputConfig{Effort: c.thinkingEffort}
 }
 
 func (c *anthropicChat) Initialize(history []*api.Message) error {
@@ -495,7 +554,7 @@ func (c *anthropicChat) Send(ctx context.Context, contents ...any) (ChatResponse
 	// Prepare the request
 	reqBody := anthropicRequest{
 		Model:     c.model,
-		MaxTokens: 4096,
+		MaxTokens: defaultMaxTokens,
 		Messages:  tempMessages,
 	}
 
@@ -507,6 +566,8 @@ func (c *anthropicChat) Send(ctx context.Context, contents ...any) (ChatResponse
 		reqBody.Tools = c.tools
 		klog.V(1).Infof("Request includes %d tools", len(c.tools))
 	}
+
+	c.applyThinkingConfig(&reqBody)
 
 	// Marshal request
 	bodyBytes, err := json.Marshal(reqBody)
@@ -611,7 +672,7 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 	// Prepare the streaming request
 	reqBody := anthropicRequest{
 		Model:     c.model,
-		MaxTokens: 4096,
+		MaxTokens: defaultMaxTokens,
 		Messages:  tempMessages,
 		Stream:    true,
 	}
@@ -625,6 +686,8 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 		reqBody.Tools = c.tools
 		klog.V(1).Infof("Streaming request includes %d tools", len(c.tools))
 	}
+
+	c.applyThinkingConfig(&reqBody)
 
 	// Marshal request
 	bodyBytes, err := json.Marshal(reqBody)
