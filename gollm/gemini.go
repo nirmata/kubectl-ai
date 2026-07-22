@@ -95,9 +95,9 @@ type VertexAIClientOptions struct {
 }
 
 // vertexaiViaGeminiFactory is the provider factory function for VertexAI via Gemini.
-// Supports ClientOptions for consistency, but skipVerifySSL is not used.
-// vertexaiViaGeminiFactory is intentionally env/ADC-only: ottoflow maps no
-// provider to vertexai, so ClientOptions.APIKey is not wired here.
+// Supports ClientOptions for consistency, but skipVerifySSL is not used. It is
+// intentionally env/ADC-only: no provider maps to vertexai here, so
+// ClientOptions.APIKey is not wired into it.
 func vertexaiViaGeminiFactory(ctx context.Context, opts ClientOptions) (Client, error) {
 	opt := VertexAIClientOptions{}
 	return NewVertexAIClient(ctx, opt)
