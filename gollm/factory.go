@@ -80,6 +80,28 @@ func WithAPIKey(apiKey string) Option {
 	}
 }
 
+// apiKeyEnvVars maps provider IDs to the environment variable each factory
+// reads its API key from. Factories and external callers (e.g. ottoflow's
+// credential forwarding) share this single mapping.
+var apiKeyEnvVars = map[string]string{
+	"openai":    "OPENAI_API_KEY",
+	"anthropic": "ANTHROPIC_API_KEY",
+	"azopenai":  "AZURE_OPENAI_API_KEY",
+	"gemini":    "GEMINI_API_KEY",
+}
+
+// APIKeyEnvVar returns the environment variable name a provider's factory
+// reads its API key from, or "" if the provider takes no API key.
+func APIKeyEnvVar(providerID string) string { return apiKeyEnvVars[providerID] }
+
+// resolveAPIKey returns opts.APIKey when set, else the provider's env var.
+func resolveAPIKey(opts ClientOptions, providerID string) string {
+	if opts.APIKey != "" {
+		return opts.APIKey
+	}
+	return os.Getenv(APIKeyEnvVar(providerID))
+}
+
 type FactoryFunc func(ctx context.Context, opts ClientOptions) (Client, error)
 
 func RegisterProvider(id string, factoryFunc FactoryFunc) error {

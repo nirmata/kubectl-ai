@@ -60,12 +60,9 @@ type GeminiAPIClientOptions struct {
 
 // NewGeminiAPIClient builds a client for the Gemini API.
 func NewGeminiAPIClient(ctx context.Context, opt GeminiAPIClientOptions) (*GoogleAIClient, error) {
-	apiKey := opt.APIKey
+	apiKey := resolveAPIKey(ClientOptions{APIKey: opt.APIKey}, "gemini")
 	if apiKey == "" {
-		apiKey = os.Getenv("GEMINI_API_KEY")
-	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("GEMINI_API_KEY environment variable not set")
+		return nil, fmt.Errorf("%s environment variable not set", APIKeyEnvVar("gemini"))
 	}
 	skipVerifySSL := false
 	httpClient := createCustomHTTPClient(skipVerifySSL)

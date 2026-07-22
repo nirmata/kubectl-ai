@@ -40,10 +40,18 @@ func TestWithAPIKey(t *testing.T) {
 	}
 }
 
-func TestWithAPIKeyEmptyIsZeroValue(t *testing.T) {
-	var opts ClientOptions
-	if opts.APIKey != "" {
-		t.Fatalf("zero-value ClientOptions.APIKey should be empty, got %q", opts.APIKey)
+func TestAPIKeyEnvVar(t *testing.T) {
+	tests := map[string]string{
+		"openai":    "OPENAI_API_KEY",
+		"anthropic": "ANTHROPIC_API_KEY",
+		"azopenai":  "AZURE_OPENAI_API_KEY",
+		"gemini":    "GEMINI_API_KEY",
+		"unknown":   "",
+	}
+	for providerID, want := range tests {
+		if got := APIKeyEnvVar(providerID); got != want {
+			t.Errorf("APIKeyEnvVar(%q) = %q, want %q", providerID, got, want)
+		}
 	}
 }
 

@@ -80,11 +80,7 @@ var _ Client = &OpenAIClient{}
 // NewOpenAIClient creates a new client for interacting with OpenAI.
 // Supports custom HTTP client (e.g., for skipping SSL verification).
 func NewOpenAIClient(ctx context.Context, opts ClientOptions) (*OpenAIClient, error) {
-	// Prefer the per-request API key; otherwise read the env var at factory time.
-	apiKey := opts.APIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_API_KEY")
-	}
+	apiKey := resolveAPIKey(opts, "openai")
 	if apiKey == "" {
 		return nil, errors.New("OpenAI API key not found. Set via OPENAI_API_KEY env var or WithAPIKey")
 	}
