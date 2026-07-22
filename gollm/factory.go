@@ -55,6 +55,10 @@ func (r *registry) listProviders() []string {
 type ClientOptions struct {
 	URL           *url.URL
 	SkipVerifySSL bool
+	// APIKey, when non-empty, is the provider API key to use instead of reading
+	// the provider's API-key environment variable at factory time. Empty means
+	// "fall back to the env var" (backward compatible).
+	APIKey string
 	// Extend with more options as needed
 }
 
@@ -65,6 +69,14 @@ type Option func(*ClientOptions)
 func WithSkipVerifySSL() Option {
 	return func(o *ClientOptions) {
 		o.SkipVerifySSL = true
+	}
+}
+
+// WithAPIKey sets the provider API key on ClientOptions. When set (non-empty),
+// provider factories prefer it over their API-key environment variable.
+func WithAPIKey(apiKey string) Option {
+	return func(o *ClientOptions) {
+		o.APIKey = apiKey
 	}
 }
 

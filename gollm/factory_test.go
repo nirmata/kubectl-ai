@@ -31,3 +31,18 @@ func TestNewClient(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 }
+
+func TestWithAPIKey(t *testing.T) {
+	var opts ClientOptions
+	WithAPIKey("sk-test-123")(&opts)
+	if opts.APIKey != "sk-test-123" {
+		t.Fatalf("WithAPIKey did not set APIKey: got %q, want %q", opts.APIKey, "sk-test-123")
+	}
+}
+
+func TestWithAPIKeyEmptyIsZeroValue(t *testing.T) {
+	var opts ClientOptions
+	if opts.APIKey != "" {
+		t.Fatalf("zero-value ClientOptions.APIKey should be empty, got %q", opts.APIKey)
+	}
+}
