@@ -73,7 +73,10 @@ func NewAzureOpenAIClient(ctx context.Context, opts ClientOptions) (*AzureOpenAI
 	// Create a custom HTTP client (supports SkipVerifySSL)
 	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
 
-	azureOpenAIKey := os.Getenv("AZURE_OPENAI_API_KEY")
+	azureOpenAIKey := opts.APIKey
+	if azureOpenAIKey == "" {
+		azureOpenAIKey = os.Getenv("AZURE_OPENAI_API_KEY")
+	}
 	clientOpts := &azopenai.ClientOptions{
 		ClientOptions: azcore.ClientOptions{
 			Transport: httpClient,

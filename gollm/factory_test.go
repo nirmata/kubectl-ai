@@ -46,3 +46,14 @@ func TestWithAPIKeyEmptyIsZeroValue(t *testing.T) {
 		t.Fatalf("zero-value ClientOptions.APIKey should be empty, got %q", opts.APIKey)
 	}
 }
+
+func TestAnthropicFactoryPrefersWithAPIKeyOverEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	c, err := NewClient(context.Background(), "anthropic", WithAPIKey("sk-ant-from-option"))
+	if err != nil {
+		t.Fatalf("expected client to build from WithAPIKey with empty env, got error: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected non-nil client")
+	}
+}

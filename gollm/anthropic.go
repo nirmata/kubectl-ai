@@ -64,10 +64,13 @@ var _ Client = &AnthropicClient{}
 
 // Creates a new client for interacting with Anthropic Claude models
 func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClient, error) {
-	apiKey := os.Getenv(envAnthropicAPIKey)
+	apiKey := opts.APIKey
+	if apiKey == "" {
+		apiKey = os.Getenv(envAnthropicAPIKey)
+	}
 	if apiKey == "" {
 		klog.Errorf("ANTHROPIC_API_KEY environment variable not set")
-		return nil, fmt.Errorf("%s environment variable not set", envAnthropicAPIKey)
+		return nil, fmt.Errorf("%s environment variable not set (or pass WithAPIKey)", envAnthropicAPIKey)
 	}
 
 	// Get base URL
