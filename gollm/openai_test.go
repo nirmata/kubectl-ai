@@ -606,13 +606,35 @@ func TestConvertToolCallsToFunctionCalls(t *testing.T) {
 	}
 }
 
+// TestOpenAIFactoryPrefersWithAPIKeyOverEnv exercises both the empty-env and
+// populated-env cases. OpenAIClient does not expose the resolved API key (the
+// openai-go SDK stores it behind a RequestOption applied against an
+// unexported, internal-package RequestConfig that gollm cannot reach), so a
+// direct "option beat env" equality assertion isn't available without a real
+// network call. Covering both cases is the strongest hermetic check we can
+// make: it proves the option path builds successfully whether or not the env
+// var happens to be set, which the pre-fix code (env-only) could not do when
+// the env was empty.
 func TestOpenAIFactoryPrefersWithAPIKeyOverEnv(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "") // ensure env is absent for this test
-	c, err := NewClient(context.Background(), "openai", WithAPIKey("sk-from-option"))
-	if err != nil {
-		t.Fatalf("expected client to build from WithAPIKey with empty env, got error: %v", err)
-	}
-	if c == nil {
-		t.Fatal("expected non-nil client")
-	}
+	t.Run("env empty", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "")
+		c, err := NewClient(context.Background(), "openai", WithAPIKey("sk-from-option"))
+		if err != nil {
+			t.Fatalf("expected client to build from WithAPIKey with empty env, got error: %v", err)
+		}
+		if c == nil {
+			t.Fatal("expected non-nil client")
+		}
+	})
+
+	t.Run("env populated with sentinel", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "env-key-should-lose")
+		c, err := NewClient(context.Background(), "openai", WithAPIKey("sk-from-option"))
+		if err != nil {
+			t.Fatalf("expected client to build from WithAPIKey even when env is populated, got error: %v", err)
+		}
+		if c == nil {
+			t.Fatal("expected non-nil client")
+		}
+	})
 }

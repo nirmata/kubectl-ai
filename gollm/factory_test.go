@@ -48,12 +48,16 @@ func TestWithAPIKeyEmptyIsZeroValue(t *testing.T) {
 }
 
 func TestAnthropicFactoryPrefersWithAPIKeyOverEnv(t *testing.T) {
-	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "env-key-should-lose")
 	c, err := NewClient(context.Background(), "anthropic", WithAPIKey("sk-ant-from-option"))
 	if err != nil {
-		t.Fatalf("expected client to build from WithAPIKey with empty env, got error: %v", err)
+		t.Fatalf("expected client to build from WithAPIKey, got error: %v", err)
 	}
-	if c == nil {
-		t.Fatal("expected non-nil client")
+	ac, ok := c.(*AnthropicClient)
+	if !ok {
+		t.Fatalf("expected *AnthropicClient, got %T", c)
+	}
+	if ac.apiKey != "sk-ant-from-option" {
+		t.Fatalf("expected option key to win over env, got apiKey %q", ac.apiKey)
 	}
 }
