@@ -15,6 +15,7 @@
 package gollm
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -602,5 +603,16 @@ func TestConvertToolCallsToFunctionCalls(t *testing.T) {
 				tt.validateCalls(t, calls)
 			}
 		})
+	}
+}
+
+func TestOpenAIFactoryPrefersWithAPIKeyOverEnv(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "") // ensure env is absent for this test
+	c, err := NewClient(context.Background(), "openai", WithAPIKey("sk-from-option"))
+	if err != nil {
+		t.Fatalf("expected client to build from WithAPIKey with empty env, got error: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected non-nil client")
 	}
 }

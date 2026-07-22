@@ -32,7 +32,6 @@ import (
 
 // Package-level env var storage (OpenAI env)
 var (
-	openAIAPIKey          string
 	openAIEndpoint        string
 	openAIAPIBase         string
 	openAIModel           string
@@ -46,7 +45,6 @@ var (
 // After loading env values, it registers the OpenAI provider factory.
 func init() {
 	// Load environment variables
-	openAIAPIKey = os.Getenv("OPENAI_API_KEY")
 	openAIEndpoint = os.Getenv("OPENAI_ENDPOINT")
 	openAIAPIBase = os.Getenv("OPENAI_API_BASE")
 	openAIModel = os.Getenv("OPENAI_MODEL")
@@ -82,10 +80,13 @@ var _ Client = &OpenAIClient{}
 // NewOpenAIClient creates a new client for interacting with OpenAI.
 // Supports custom HTTP client (e.g., for skipping SSL verification).
 func NewOpenAIClient(ctx context.Context, opts ClientOptions) (*OpenAIClient, error) {
-	// Get API key from loaded env var
-	apiKey := openAIAPIKey
+	// Prefer the per-request API key; otherwise read the env var at factory time.
+	apiKey := opts.APIKey
 	if apiKey == "" {
-		return nil, errors.New("OpenAI API key not found. Set via OPENAI_API_KEY env var")
+		apiKey = os.Getenv("OPENAI_API_KEY")
+	}
+	if apiKey == "" {
+		return nil, errors.New("OpenAI API key not found. Set via OPENAI_API_KEY env var or WithAPIKey")
 	}
 
 	// Set options for client creation
