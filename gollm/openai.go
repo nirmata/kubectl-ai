@@ -103,7 +103,7 @@ func NewOpenAIClient(ctx context.Context, opts ClientOptions) (*OpenAIClient, er
 	}
 
 	// Support custom HTTP client (e.g., skip SSL verification)
-	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
+	httpClient := createCustomHTTPClient(opts.SkipVerifySSL, opts.WrapTransport)
 	httpClient = withJournaling(httpClient)
 	options = append(options, option.WithHTTPClient(httpClient))
 

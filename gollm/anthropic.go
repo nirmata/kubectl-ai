@@ -89,7 +89,7 @@ func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClie
 		return nil, fmt.Errorf("parsing base URL: %w", err)
 	}
 
-	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
+	httpClient := createCustomHTTPClient(opts.SkipVerifySSL, opts.WrapTransport)
 
 	client := &AnthropicClient{
 		baseURL:    baseURL,
