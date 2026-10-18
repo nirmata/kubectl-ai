@@ -74,8 +74,9 @@ func WithSkipVerifySSL() Option {
 	}
 }
 
-// WithTransportWrapper wraps the HTTP transport gollm builds for providers that
-// use the shared HTTP client. The wrapper receives gollm's transport as base.
+// WithTransportWrapper wraps the HTTP transport gollm builds. Applied by the
+// openai (including openai-compatible), anthropic, azopenai, grok and llamacpp
+// providers; gemini ignores it. The wrapper receives gollm's transport as base.
 func WithTransportWrapper(wrap func(base http.RoundTripper) http.RoundTripper) Option {
 	return func(o *ClientOptions) {
 		o.WrapTransport = wrap
