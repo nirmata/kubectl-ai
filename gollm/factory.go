@@ -55,6 +55,12 @@ func (r *registry) listProviders() []string {
 type ClientOptions struct {
 	URL           *url.URL
 	SkipVerifySSL bool
+	// WrapTransport, if set, wraps the http.RoundTripper that providers using
+	// the shared HTTP client build (openai, anthropic, azopenai, grok, llamacpp).
+	// It receives gollm's own transport and is expected to delegate to it.
+	// gemini also builds its client via createCustomHTTPClient but passes a nil
+	// wrapper. Not applied by providers with their own client (vertexai, bedrock).
+	WrapTransport func(http.RoundTripper) http.RoundTripper
 	// Extend with more options as needed
 }
 
@@ -65,6 +71,15 @@ type Option func(*ClientOptions)
 func WithSkipVerifySSL() Option {
 	return func(o *ClientOptions) {
 		o.SkipVerifySSL = true
+	}
+}
+
+// WithTransportWrapper wraps the HTTP transport gollm builds. Applied by the
+// openai (including openai-compatible), anthropic, azopenai, grok and llamacpp
+// providers; gemini ignores it. The wrapper receives gollm's transport as base.
+func WithTransportWrapper(wrap func(base http.RoundTripper) http.RoundTripper) Option {
+	return func(o *ClientOptions) {
+		o.WrapTransport = wrap
 	}
 }
 
@@ -204,7 +219,8 @@ func DefaultIsRetryableError(err error) bool {
 
 // createCustomHTTPClient returns an *http.Client that optionally skips SSL certificate verification.
 // This is shared by all providers that need custom HTTP transport.
-func createCustomHTTPClient(skipVerify bool) *http.Client {
+// A non-nil wrap is applied on top of the transport built here.
+func createCustomHTTPClient(skipVerify bool, wrap func(http.RoundTripper) http.RoundTripper) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyFromEnvironment
 	if skipVerify {
@@ -212,8 +228,13 @@ func createCustomHTTPClient(skipVerify bool) *http.Client {
 
 	}
 
+	var rt http.RoundTripper = transport
+	if wrap != nil {
+		rt = wrap(rt)
+	}
+
 	return &http.Client{
-		Transport: transport,
+		Transport: rt,
 		Timeout:   180 * time.Second,
 	}
 }

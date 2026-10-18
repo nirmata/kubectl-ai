@@ -66,7 +66,7 @@ func NewGeminiAPIClient(ctx context.Context, opt GeminiAPIClientOptions) (*Googl
 		return nil, fmt.Errorf("GEMINI_API_KEY environment variable not set")
 	}
 	skipVerifySSL := false
-	httpClient := createCustomHTTPClient(skipVerifySSL)
+	httpClient := createCustomHTTPClient(skipVerifySSL, nil)
 	httpClient = withJournaling(httpClient)
 	cc := &genai.ClientConfig{
 		APIKey:     apiKey,
