@@ -57,9 +57,9 @@ type ClientOptions struct {
 	SkipVerifySSL bool
 	// WrapTransport, if set, wraps the http.RoundTripper that providers using
 	// the shared HTTP client build (openai, anthropic, azopenai, grok, llamacpp).
-	// It receives gollm's own transport and must delegate to it: the base is
-	// wrapped, never replaced. Not applied by providers with their own client
-	// (e.g. gemini, bedrock).
+	// It receives gollm's own transport and is expected to delegate to it.
+	// gemini also builds its client via createCustomHTTPClient but passes a nil
+	// wrapper. Not applied by providers with their own client (vertexai, bedrock).
 	WrapTransport func(http.RoundTripper) http.RoundTripper
 	// Extend with more options as needed
 }
