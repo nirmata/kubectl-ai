@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/api"
+	"github.com/aws/aws-sdk-go-v2/aws"
 
 	"k8s.io/klog/v2"
 )
@@ -64,6 +65,12 @@ type ClientOptions struct {
 	// http or https URL. Empty means "use the provider default" (backward
 	// compatible). See WithBaseURL for which providers honour it.
 	BaseURL string
+	// AWSRegion, when non-empty, is the AWS region used by the bedrock
+	// provider instead of the region from AWS_REGION / shared config.
+	AWSRegion string
+	// AWSCredentialsProvider, when non-nil, supplies the AWS credentials used
+	// by the bedrock provider instead of the default credential chain.
+	AWSCredentialsProvider aws.CredentialsProvider
 	// Extend with more options as needed
 }
 
@@ -98,6 +105,32 @@ func WithAPIKey(apiKey string) Option {
 func WithBaseURL(baseURL string) Option {
 	return func(o *ClientOptions) {
 		o.BaseURL = baseURL
+	}
+}
+
+// WithAWSRegion sets the AWS region for the bedrock provider. It takes
+// precedence over AWS_REGION, AWS_DEFAULT_REGION and shared config. When
+// unset, the default AWS config chain applies (falling back to us-east-1).
+func WithAWSRegion(region string) Option {
+	return func(o *ClientOptions) {
+		o.AWSRegion = region
+	}
+}
+
+// WithAWSCredentialsProvider sets the AWS credentials provider for the bedrock
+// provider, taking precedence over AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+// AWS_SESSION_TOKEN, AWS_PROFILE and the rest of the default credential chain.
+// For example:
+//
+//	// static keys with an optional session token
+//	credentials.NewStaticCredentialsProvider(accessKeyID, secretKey, sessionToken)
+//	// assume a role
+//	stscreds.NewAssumeRoleProvider(sts.NewFromConfig(baseCfg), roleARN)
+//
+// Providers are wrapped in an aws.CredentialsCache unless already cached.
+func WithAWSCredentialsProvider(provider aws.CredentialsProvider) Option {
+	return func(o *ClientOptions) {
+		o.AWSCredentialsProvider = provider
 	}
 }
 

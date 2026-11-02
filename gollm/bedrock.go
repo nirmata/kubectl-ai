@@ -68,7 +68,15 @@ func NewBedrockClient(ctx context.Context, opts ClientOptions) (*BedrockClient, 
 	configCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cfg, err := config.LoadDefaultConfig(configCtx)
+	var loadOpts []func(*config.LoadOptions) error
+	if opts.AWSRegion != "" {
+		loadOpts = append(loadOpts, config.WithRegion(opts.AWSRegion))
+	}
+	if opts.AWSCredentialsProvider != nil {
+		loadOpts = append(loadOpts, config.WithCredentialsProvider(opts.AWSCredentialsProvider))
+	}
+
+	cfg, err := config.LoadDefaultConfig(configCtx, loadOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
