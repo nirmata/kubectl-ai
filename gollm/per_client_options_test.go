@@ -196,6 +196,8 @@ func TestWithBaseURLValidation(t *testing.T) {
 		{"/v1", true},
 		{"https://", true},
 		{"http://bad host", true},
+		{"http://:8080", true},
+		{"https://:443", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.baseURL, func(t *testing.T) {
