@@ -69,7 +69,31 @@ func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClie
 		return nil, fmt.Errorf("%s environment variable not set (or pass WithAPIKey)", APIKeyEnvVar("anthropic"))
 	}
 
-	// Get base URL
+	// Get base URL: WithBaseURL > ANTHROPIC_BASE_URL > provider URL host > default
+	baseURL, err := parseBaseURL(opts)
+	if err != nil {
+		return nil, err
+	}
+	if baseURL != nil {
+		klog.V(1).Infof("Using Anthropic base URL from ClientOptions.BaseURL: %s", baseURL)
+	} else if baseURL, err = anthropicBaseURLFromEnv(opts); err != nil {
+		return nil, err
+	}
+
+	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
+
+	client := &AnthropicClient{
+		baseURL:    baseURL,
+		httpClient: httpClient,
+		apiKey:     apiKey,
+	}
+
+	return client, nil
+}
+
+// anthropicBaseURLFromEnv resolves the legacy base URL:
+// ANTHROPIC_BASE_URL > provider URL host > default.
+func anthropicBaseURLFromEnv(opts ClientOptions) (*url.URL, error) {
 	baseURLStr := os.Getenv(envAnthropicBaseURL)
 	if baseURLStr == "" {
 		if opts.URL != nil && opts.URL.Host != "" {
@@ -87,16 +111,7 @@ func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClie
 	if err != nil {
 		return nil, fmt.Errorf("parsing base URL: %w", err)
 	}
-
-	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
-
-	client := &AnthropicClient{
-		baseURL:    baseURL,
-		httpClient: httpClient,
-		apiKey:     apiKey,
-	}
-
-	return client, nil
+	return baseURL, nil
 }
 
 func (c *AnthropicClient) Close() error {

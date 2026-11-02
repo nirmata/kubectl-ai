@@ -59,6 +59,11 @@ type ClientOptions struct {
 	// the provider's API-key environment variable at factory time. Empty means
 	// "fall back to the env var" (backward compatible).
 	APIKey string
+	// BaseURL, when non-empty, is the provider API base URL to use instead of
+	// the provider's base-URL environment variables. It must be an absolute
+	// http or https URL. Empty means "use the provider default" (backward
+	// compatible). See WithBaseURL for which providers honour it.
+	BaseURL string
 	// Extend with more options as needed
 }
 
@@ -78,6 +83,37 @@ func WithAPIKey(apiKey string) Option {
 	return func(o *ClientOptions) {
 		o.APIKey = apiKey
 	}
+}
+
+// WithBaseURL sets a per-client API base URL (for example a proxy or gateway
+// in front of the provider). It takes precedence over the provider's base-URL
+// environment variables and is applied by:
+//   - anthropic: WithBaseURL > ANTHROPIC_BASE_URL > provider URL host > default
+//   - openai / openai-compatible: WithBaseURL > OPENAI_ENDPOINT > OPENAI_API_BASE
+//
+// azopenai takes its per-client endpoint from the provider ID instead
+// ("azopenai://<endpoint>"), which already wins over AZURE_OPENAI_ENDPOINT.
+// The URL must be absolute with an http or https scheme; NewClient returns an
+// error otherwise.
+func WithBaseURL(baseURL string) Option {
+	return func(o *ClientOptions) {
+		o.BaseURL = baseURL
+	}
+}
+
+// parseBaseURL validates opts.BaseURL. It returns (nil, nil) when unset.
+func parseBaseURL(opts ClientOptions) (*url.URL, error) {
+	if opts.BaseURL == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(opts.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base URL %q: %w", opts.BaseURL, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("invalid base URL %q: must be an absolute http or https URL", opts.BaseURL)
+	}
+	return u, nil
 }
 
 // apiKeyEnvVars maps provider IDs to the environment variable each factory
@@ -153,6 +189,9 @@ func (r *registry) NewClient(ctx context.Context, providerID string, opts ...Opt
 	}
 	for _, opt := range opts {
 		opt(&clientOpts)
+	}
+	if _, err := parseBaseURL(clientOpts); err != nil {
+		return nil, err
 	}
 
 	return factoryFunc(ctx, clientOpts)

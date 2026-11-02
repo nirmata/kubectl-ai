@@ -88,8 +88,15 @@ func NewOpenAIClient(ctx context.Context, opts ClientOptions) (*OpenAIClient, er
 	// Set options for client creation
 	options := []option.RequestOption{option.WithAPIKey(apiKey)}
 
-	// Check for custom endpoint or API base URL
-	baseURL := openAIEndpoint
+	// Check for custom endpoint or API base URL:
+	// WithBaseURL > OPENAI_ENDPOINT > OPENAI_API_BASE
+	if _, err := parseBaseURL(opts); err != nil {
+		return nil, err
+	}
+	baseURL := opts.BaseURL
+	if baseURL == "" {
+		baseURL = openAIEndpoint
+	}
 	if baseURL == "" {
 		baseURL = openAIAPIBase
 	}
