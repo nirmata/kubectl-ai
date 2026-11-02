@@ -110,7 +110,7 @@ func parseBaseURL(opts ClientOptions) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL %q: %w", opts.BaseURL, err)
 	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return nil, fmt.Errorf("invalid base URL %q: must be an absolute http or https URL", opts.BaseURL)
 	}
 	return u, nil
