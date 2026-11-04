@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/api"
+	"github.com/aws/aws-sdk-go-v2/aws"
 
 	"k8s.io/klog/v2"
 )
@@ -55,12 +56,31 @@ func (r *registry) listProviders() []string {
 type ClientOptions struct {
 	URL           *url.URL
 	SkipVerifySSL bool
+	// APIKey, when non-empty, is the provider API key to use instead of reading
+	// the provider's API-key environment variable at factory time. Empty means
+	// "fall back to the env var" (backward compatible).
+	APIKey string
+	// BaseURL, when non-empty, is the provider API base URL to use instead of
+	// the provider's base-URL environment variables. It must be an absolute
+	// http or https URL. Empty means "use the provider default" (backward
+	// compatible). See WithBaseURL for which providers honour it.
+	BaseURL string
+	// AWSRegion, when non-empty, is the AWS region used by the bedrock
+	// provider instead of the region from AWS_REGION / shared config.
+	AWSRegion string
+	// AWSCredentialsProvider, when non-nil, supplies the AWS credentials used
+	// by the bedrock provider instead of the default credential chain.
+	AWSCredentialsProvider aws.CredentialsProvider
 	// WrapTransport, if set, wraps the http.RoundTripper that providers using
 	// the shared HTTP client build (openai, anthropic, azopenai, grok, llamacpp).
 	// It receives gollm's own transport and is expected to delegate to it.
 	// gemini also builds its client via createCustomHTTPClient but passes a nil
 	// wrapper. Not applied by providers with their own client (vertexai, bedrock).
 	WrapTransport func(http.RoundTripper) http.RoundTripper
+	// ProviderConfig carries provider-specific settings for providers
+	// registered outside gollm (via RegisterProvider). gollm's own providers
+	// ignore it. See WithProviderConfig.
+	ProviderConfig any
 	// Extend with more options as needed
 }
 
@@ -74,9 +94,109 @@ func WithSkipVerifySSL() Option {
 	}
 }
 
+// WithAPIKey sets the provider API key on ClientOptions. When set (non-empty),
+// provider factories prefer it over their API-key environment variable.
+func WithAPIKey(apiKey string) Option {
+	return func(o *ClientOptions) {
+		o.APIKey = apiKey
+	}
+}
+
+// WithBaseURL sets a per-client API base URL (for example a proxy or gateway
+// in front of the provider). It takes precedence over the provider's base-URL
+// environment variables and is applied by:
+//   - anthropic: WithBaseURL > ANTHROPIC_BASE_URL > provider URL host > default
+//   - openai / openai-compatible: WithBaseURL > OPENAI_ENDPOINT > OPENAI_API_BASE
+//
+// azopenai takes its per-client endpoint from the provider ID instead
+// ("azopenai://<endpoint>"), which already wins over AZURE_OPENAI_ENDPOINT.
+// The URL must be absolute with an http or https scheme; NewClient returns an
+// error otherwise.
+func WithBaseURL(baseURL string) Option {
+	return func(o *ClientOptions) {
+		o.BaseURL = baseURL
+	}
+}
+
+// WithAWSRegion sets the AWS region for the bedrock provider. It takes
+// precedence over AWS_REGION, AWS_DEFAULT_REGION and shared config. When
+// unset, the default AWS config chain applies (falling back to us-east-1).
+func WithAWSRegion(region string) Option {
+	return func(o *ClientOptions) {
+		o.AWSRegion = region
+	}
+}
+
+// WithAWSCredentialsProvider sets the AWS credentials provider for the bedrock
+// provider, taking precedence over AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+// AWS_SESSION_TOKEN, AWS_PROFILE and the rest of the default credential chain.
+// For example:
+//
+//	// static keys with an optional session token
+//	credentials.NewStaticCredentialsProvider(accessKeyID, secretKey, sessionToken)
+//	// assume a role
+//	stscreds.NewAssumeRoleProvider(sts.NewFromConfig(baseCfg), roleARN)
+//
+// Providers are wrapped in an aws.CredentialsCache unless already cached.
+func WithAWSCredentialsProvider(provider aws.CredentialsProvider) Option {
+	return func(o *ClientOptions) {
+		o.AWSCredentialsProvider = provider
+	}
+}
+
+// parseBaseURL validates opts.BaseURL. It returns (nil, nil) when unset.
+func parseBaseURL(opts ClientOptions) (*url.URL, error) {
+	if opts.BaseURL == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(opts.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base URL %q: %w", opts.BaseURL, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return nil, fmt.Errorf("invalid base URL %q: must be an absolute http or https URL", opts.BaseURL)
+	}
+	return u, nil
+}
+
+// apiKeyEnvVars maps provider IDs to the environment variable each factory
+// reads its API key from. Factories and external callers (e.g. ottoflow's
+// credential forwarding) share this single mapping.
+var apiKeyEnvVars = map[string]string{
+	"openai":    "OPENAI_API_KEY",
+	"anthropic": "ANTHROPIC_API_KEY",
+	"azopenai":  "AZURE_OPENAI_API_KEY",
+	"gemini":    "GEMINI_API_KEY",
+	"grok":      "GROK_API_KEY",
+
+	"openai-compatible": "OPENAI_API_KEY",
+}
+
+// APIKeyEnvVar returns the environment variable name a provider's factory
+// reads its API key from, or "" if the provider takes no API key.
+func APIKeyEnvVar(providerID string) string { return apiKeyEnvVars[providerID] }
+
+// resolveAPIKey returns opts.APIKey when set, else the provider's env var.
+func resolveAPIKey(opts ClientOptions, providerID string) string {
+	if opts.APIKey != "" {
+		return opts.APIKey
+	}
+	return os.Getenv(APIKeyEnvVar(providerID))
+}
+
 // WithTransportWrapper wraps the HTTP transport gollm builds. Applied by the
 // openai (including openai-compatible), anthropic, azopenai, grok and llamacpp
 // providers; gemini ignores it. The wrapper receives gollm's transport as base.
+// WithProviderConfig attaches provider-specific settings that have no
+// dedicated option, for providers registered outside gollm. The provider
+// defines the type it accepts and should reject a value of the wrong type.
+// gollm's own providers ignore it.
+func WithProviderConfig(cfg any) Option {
+	return func(o *ClientOptions) {
+		o.ProviderConfig = cfg
+	}
+}
+
 func WithTransportWrapper(wrap func(base http.RoundTripper) http.RoundTripper) Option {
 	return func(o *ClientOptions) {
 		o.WrapTransport = wrap
@@ -134,6 +254,9 @@ func (r *registry) NewClient(ctx context.Context, providerID string, opts ...Opt
 	}
 	for _, opt := range opts {
 		opt(&clientOpts)
+	}
+	if _, err := parseBaseURL(clientOpts); err != nil {
+		return nil, err
 	}
 
 	return factoryFunc(ctx, clientOpts)

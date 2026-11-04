@@ -15,7 +15,9 @@
 package gollm
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/openai/openai-go"
@@ -600,6 +602,26 @@ func TestConvertToolCallsToFunctionCalls(t *testing.T) {
 
 			if tt.validateCalls != nil && len(calls) > 0 {
 				tt.validateCalls(t, calls)
+			}
+		})
+	}
+}
+
+// TestOpenAIFactoryBuildsWithAPIKeyOption asserts construction succeeds via
+// WithAPIKey regardless of the env var. OpenAIClient doesn't expose its
+// resolved key (it's behind an unexported, internal-package RequestConfig
+// in the openai-go SDK), so precedence itself isn't observable here without
+// a real network call.
+func TestOpenAIFactoryBuildsWithAPIKeyOption(t *testing.T) {
+	for _, env := range []string{"", "env-key-should-lose"} {
+		t.Run(fmt.Sprintf("env=%q", env), func(t *testing.T) {
+			t.Setenv("OPENAI_API_KEY", env)
+			c, err := NewClient(context.Background(), "openai", WithAPIKey("sk-from-option"))
+			if err != nil {
+				t.Fatalf("expected client to build from WithAPIKey, got error: %v", err)
+			}
+			if c == nil {
+				t.Fatal("expected non-nil client")
 			}
 		})
 	}

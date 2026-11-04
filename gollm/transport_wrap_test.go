@@ -59,9 +59,10 @@ func TestTransportWrapper(t *testing.T) {
 
 	cases := map[string]func(t *testing.T){
 		"openai": func(t *testing.T) {
-			oldKey, oldEP := openAIAPIKey, openAIEndpoint
-			t.Cleanup(func() { openAIAPIKey, openAIEndpoint = oldKey, oldEP })
-			openAIAPIKey, openAIEndpoint = "x", srv.URL
+			oldEP := openAIEndpoint
+			t.Cleanup(func() { openAIEndpoint = oldEP })
+			t.Setenv("OPENAI_API_KEY", "x")
+			openAIEndpoint = srv.URL
 			c, err := NewOpenAIClient(context.Background(), opts)
 			if err != nil {
 				t.Fatal(err)

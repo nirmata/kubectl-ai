@@ -46,7 +46,9 @@ func init() {
 // geminiFactory is the provider factory function for Gemini.
 // Supports ClientOptions for consistency, but skipVerifySSL is not used.
 func geminiFactory(ctx context.Context, opts ClientOptions) (Client, error) {
-	opt := GeminiAPIClientOptions{}
+	// Wire the public ClientOptions API key through; NewGeminiAPIClient still
+	// falls back to GEMINI_API_KEY when this is empty.
+	opt := GeminiAPIClientOptions{APIKey: opts.APIKey}
 	return NewGeminiAPIClient(ctx, opt)
 }
 
@@ -58,12 +60,9 @@ type GeminiAPIClientOptions struct {
 
 // NewGeminiAPIClient builds a client for the Gemini API.
 func NewGeminiAPIClient(ctx context.Context, opt GeminiAPIClientOptions) (*GoogleAIClient, error) {
-	apiKey := opt.APIKey
+	apiKey := resolveAPIKey(ClientOptions{APIKey: opt.APIKey}, "gemini")
 	if apiKey == "" {
-		apiKey = os.Getenv("GEMINI_API_KEY")
-	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("GEMINI_API_KEY environment variable not set")
+		return nil, fmt.Errorf("%s environment variable not set", APIKeyEnvVar("gemini"))
 	}
 	skipVerifySSL := false
 	httpClient := createCustomHTTPClient(skipVerifySSL, nil)
@@ -93,7 +92,9 @@ type VertexAIClientOptions struct {
 }
 
 // vertexaiViaGeminiFactory is the provider factory function for VertexAI via Gemini.
-// Supports ClientOptions for consistency, but skipVerifySSL is not used.
+// Supports ClientOptions for consistency, but skipVerifySSL is not used. It is
+// intentionally env/ADC-only: no provider maps to vertexai here, so
+// ClientOptions.APIKey is not wired into it.
 func vertexaiViaGeminiFactory(ctx context.Context, opts ClientOptions) (Client, error) {
 	opt := VertexAIClientOptions{}
 	return NewVertexAIClient(ctx, opt)

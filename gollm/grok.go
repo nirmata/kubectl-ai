@@ -52,9 +52,9 @@ var _ Client = &GrokClient{}
 // NewGrokClient creates a new client for interacting with X.AI's Grok model.
 // Supports custom HTTP client and skipVerifySSL via ClientOptions.
 func NewGrokClient(ctx context.Context, opts ClientOptions) (*GrokClient, error) {
-	apiKey := os.Getenv("GROK_API_KEY")
+	apiKey := resolveAPIKey(opts, "grok")
 	if apiKey == "" {
-		return nil, errors.New("GROK_API_KEY environment variable not set")
+		return nil, errors.New("Grok API key not found. Set via GROK_API_KEY env var or WithAPIKey")
 	}
 
 	// Default API endpoint for X.AI

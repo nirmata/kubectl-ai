@@ -32,7 +32,6 @@ import (
 )
 
 const (
-	envAnthropicAPIKey  = "ANTHROPIC_API_KEY"
 	envAnthropicBaseURL = "ANTHROPIC_BASE_URL"
 	envAnthropicModel   = "ANTHROPIC_MODEL"
 
@@ -64,13 +63,37 @@ var _ Client = &AnthropicClient{}
 
 // Creates a new client for interacting with Anthropic Claude models
 func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClient, error) {
-	apiKey := os.Getenv(envAnthropicAPIKey)
+	apiKey := resolveAPIKey(opts, "anthropic")
 	if apiKey == "" {
 		klog.Errorf("ANTHROPIC_API_KEY environment variable not set")
-		return nil, fmt.Errorf("%s environment variable not set", envAnthropicAPIKey)
+		return nil, fmt.Errorf("%s environment variable not set (or pass WithAPIKey)", APIKeyEnvVar("anthropic"))
 	}
 
-	// Get base URL
+	// Get base URL: WithBaseURL > ANTHROPIC_BASE_URL > provider URL host > default
+	baseURL, err := parseBaseURL(opts)
+	if err != nil {
+		return nil, err
+	}
+	if baseURL != nil {
+		klog.V(1).Infof("Using Anthropic base URL from ClientOptions.BaseURL: %s", baseURL)
+	} else if baseURL, err = anthropicBaseURLFromEnv(opts); err != nil {
+		return nil, err
+	}
+
+	httpClient := createCustomHTTPClient(opts.SkipVerifySSL, opts.WrapTransport)
+
+	client := &AnthropicClient{
+		baseURL:    baseURL,
+		httpClient: httpClient,
+		apiKey:     apiKey,
+	}
+
+	return client, nil
+}
+
+// anthropicBaseURLFromEnv resolves the legacy base URL:
+// ANTHROPIC_BASE_URL > provider URL host > default.
+func anthropicBaseURLFromEnv(opts ClientOptions) (*url.URL, error) {
 	baseURLStr := os.Getenv(envAnthropicBaseURL)
 	if baseURLStr == "" {
 		if opts.URL != nil && opts.URL.Host != "" {
@@ -88,16 +111,7 @@ func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClie
 	if err != nil {
 		return nil, fmt.Errorf("parsing base URL: %w", err)
 	}
-
-	httpClient := createCustomHTTPClient(opts.SkipVerifySSL, opts.WrapTransport)
-
-	client := &AnthropicClient{
-		baseURL:    baseURL,
-		httpClient: httpClient,
-		apiKey:     apiKey,
-	}
-
-	return client, nil
+	return baseURL, nil
 }
 
 func (c *AnthropicClient) Close() error {
