@@ -164,6 +164,11 @@ kubectl-ai --llm-provider=anthropic --model=claude-3-7-sonnet-20250219
 export ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
 kubectl-ai --llm-provider=anthropic
 
+# Cap output tokens per request (default 16384; thinking tokens count against it).
+# On models before Claude 4.5, input + max_tokens must fit the context window;
+# lower it if requests are rejected.
+export ANTHROPIC_MAX_TOKENS=16384
+
 # Use custom base URL (for proxy/gateway scenarios)
 export ANTHROPIC_BASE_URL=https://your-proxy.example.com
 kubectl-ai --llm-provider=anthropic

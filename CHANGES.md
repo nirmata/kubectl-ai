@@ -43,11 +43,15 @@ This fork extends kubectl-ai with additional features and security enhancements 
 - Full support for tool/function calling with fine-grained streaming (`input_json_delta` events)
 - Dynamic model listing via Anthropic API with fallback to hardcoded list
 - Session persistence compatibility with proper handling of tool calls and tool results
+- Thinking and redacted_thinking blocks are kept in history in received order
+- A response cut off by `max_tokens` or the context window (an incomplete tool call, or no content), a refusal, a mid-stream `error` event, a text delta before its `content_block_start`, or a stream that ends without `message_stop` returns an error and the reply is not added to history; a truncated reply that ends in text is kept, with a warning
+- Message requests no longer stop at a fixed 180 s: a stream must send its headers, and then each event, within 10 minutes, the caller must start reading it within 10 minutes of its headers, an error response must send its whole body within 10 minutes of its headers, and it is otherwise bounded by the caller's context; a non-streaming request is bounded by 10 minutes
 
 **Configuration**:
 - API key via `ANTHROPIC_API_KEY` environment variable
 - Optional base URL via `ANTHROPIC_BASE_URL` environment variable or `ClientOptions.URL`
 - Optional model selection via `ANTHROPIC_MODEL` environment variable
+- Optional output cap via `ANTHROPIC_MAX_TOKENS` environment variable (default 16384; thinking tokens count against it). Above about 21,000, a non-streaming `Send` is likely to reach its 10-minute bound
 - Default model: `claude-sonnet-4-20250514`
 
 **Usage**: 

@@ -90,6 +90,11 @@ func TestTransportWrapper(t *testing.T) {
 				t.Fatal(err)
 			}
 			resp.Body.Close()
+			// Send and SendStreaming use streamClient: same wrapped transport, no whole-body Timeout.
+			if c.streamClient.Transport != c.httpClient.Transport || c.streamClient.Timeout != 0 || c.httpClient.Timeout == 0 {
+				t.Fatalf("streamClient transport shared=%v timeout=%v; httpClient timeout=%v",
+					c.streamClient.Transport == c.httpClient.Transport, c.streamClient.Timeout, c.httpClient.Timeout)
+			}
 		},
 		"llamacpp": func(t *testing.T) {
 			t.Setenv("LLAMACPP_HOST", srv.URL)
@@ -121,6 +126,10 @@ func TestTransportWrapper(t *testing.T) {
 			tr, ok := base.(*http.Transport)
 			if !ok || tr == http.DefaultTransport || tr.Proxy == nil {
 				t.Fatalf("wrapper did not receive gollm's cloned transport: %T", base)
+			}
+			// A client with no Timeout (Anthropic's streamClient) relies on this to end a header stall.
+			if tr.ResponseHeaderTimeout < maxReplyWait {
+				t.Fatalf("transport ResponseHeaderTimeout=%v, want at least %v", tr.ResponseHeaderTimeout, maxReplyWait)
 			}
 		})
 	}

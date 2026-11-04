@@ -340,12 +340,20 @@ func DefaultIsRetryableError(err error) bool {
 	return false
 }
 
+// maxReplyWait bounds a non-streaming reply, whose headers arrive only when
+// generation ends. The shared transport's header timeout uses the same value,
+// so it never cuts such a reply before the caller's bound does.
+const maxReplyWait = 10 * time.Minute
+
 // createCustomHTTPClient returns an *http.Client that optionally skips SSL certificate verification.
 // This is shared by all providers that need custom HTTP transport.
 // A non-nil wrap is applied on top of the transport built here.
 func createCustomHTTPClient(skipVerify bool, wrap func(http.RoundTripper) http.RoundTripper) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyFromEnvironment
+	// Bound the wait for response headers, which a client with no Timeout would
+	// otherwise lack; a client's own Timeout still applies first.
+	transport.ResponseHeaderTimeout = maxReplyWait
 	if skipVerify {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
