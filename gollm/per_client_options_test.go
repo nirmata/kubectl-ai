@@ -376,3 +376,27 @@ func TestLegacyEnvOnlyPath(t *testing.T) {
 		}
 	})
 }
+
+func TestWithProviderConfigReachesRegisteredFactory(t *testing.T) {
+	type cfg struct{ Source string }
+	const id = "test-provider-config"
+	var got []any
+	var mu sync.Mutex
+	if err := RegisterProvider(id, func(_ context.Context, opts ClientOptions) (Client, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, opts.ProviderConfig)
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewClient(context.Background(), id, WithProviderConfig(cfg{Source: "a"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewClient(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != (cfg{Source: "a"}) || got[1] != nil {
+		t.Fatalf("factory saw %v", got)
+	}
+}

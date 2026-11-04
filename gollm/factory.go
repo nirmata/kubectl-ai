@@ -77,6 +77,10 @@ type ClientOptions struct {
 	// gemini also builds its client via createCustomHTTPClient but passes a nil
 	// wrapper. Not applied by providers with their own client (vertexai, bedrock).
 	WrapTransport func(http.RoundTripper) http.RoundTripper
+	// ProviderConfig carries provider-specific settings for providers
+	// registered outside gollm (via RegisterProvider). gollm's own providers
+	// ignore it. See WithProviderConfig.
+	ProviderConfig any
 	// Extend with more options as needed
 }
 
@@ -180,6 +184,16 @@ func resolveAPIKey(opts ClientOptions, providerID string) string {
 // WithTransportWrapper wraps the HTTP transport gollm builds. Applied by the
 // openai (including openai-compatible), anthropic, azopenai, grok and llamacpp
 // providers; gemini ignores it. The wrapper receives gollm's transport as base.
+// WithProviderConfig attaches provider-specific settings that have no
+// dedicated option, for providers registered outside gollm. The provider
+// defines the type it accepts and should reject a value of the wrong type.
+// gollm's own providers ignore it.
+func WithProviderConfig(cfg any) Option {
+	return func(o *ClientOptions) {
+		o.ProviderConfig = cfg
+	}
+}
+
 func WithTransportWrapper(wrap func(base http.RoundTripper) http.RoundTripper) Option {
 	return func(o *ClientOptions) {
 		o.WrapTransport = wrap
