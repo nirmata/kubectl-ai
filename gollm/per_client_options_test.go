@@ -380,9 +380,10 @@ func TestLegacyEnvOnlyPath(t *testing.T) {
 func TestWithProviderConfigReachesRegisteredFactory(t *testing.T) {
 	type cfg struct{ Source string }
 	const id = "test-provider-config"
+	var reg registry // test-local, so repeated runs (-count=N) don't collide
 	var got []any
 	var mu sync.Mutex
-	if err := RegisterProvider(id, func(_ context.Context, opts ClientOptions) (Client, error) {
+	if err := reg.RegisterProvider(id, func(_ context.Context, opts ClientOptions) (Client, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		got = append(got, opts.ProviderConfig)
@@ -390,10 +391,10 @@ func TestWithProviderConfigReachesRegisteredFactory(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewClient(context.Background(), id, WithProviderConfig(cfg{Source: "a"})); err != nil {
+	if _, err := reg.NewClient(context.Background(), id, WithProviderConfig(cfg{Source: "a"})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewClient(context.Background(), id); err != nil {
+	if _, err := reg.NewClient(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 || got[0] != (cfg{Source: "a"}) || got[1] != nil {

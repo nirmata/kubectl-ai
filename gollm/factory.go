@@ -167,6 +167,9 @@ var apiKeyEnvVars = map[string]string{
 	"anthropic": "ANTHROPIC_API_KEY",
 	"azopenai":  "AZURE_OPENAI_API_KEY",
 	"gemini":    "GEMINI_API_KEY",
+	"grok":      "GROK_API_KEY",
+
+	"openai-compatible": "OPENAI_API_KEY",
 }
 
 // APIKeyEnvVar returns the environment variable name a provider's factory

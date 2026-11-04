@@ -16,6 +16,8 @@ package gollm
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -46,7 +48,10 @@ func TestAPIKeyEnvVar(t *testing.T) {
 		"anthropic": "ANTHROPIC_API_KEY",
 		"azopenai":  "AZURE_OPENAI_API_KEY",
 		"gemini":    "GEMINI_API_KEY",
+		"grok":      "GROK_API_KEY",
 		"unknown":   "",
+
+		"openai-compatible": "OPENAI_API_KEY",
 	}
 	for providerID, want := range tests {
 		if got := APIKeyEnvVar(providerID); got != want {
@@ -67,5 +72,30 @@ func TestAnthropicFactoryPrefersWithAPIKeyOverEnv(t *testing.T) {
 	}
 	if ac.apiKey != "sk-ant-from-option" {
 		t.Fatalf("expected option key to win over env, got apiKey %q", ac.apiKey)
+	}
+}
+
+func TestGrokFactoryPrefersWithAPIKeyOverEnv(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	t.Setenv("GROK_ENDPOINT", srv.URL)
+
+	t.Setenv("GROK_API_KEY", "")
+	c, err := NewClient(context.Background(), "grok", WithAPIKey("grok-from-option"))
+	if err != nil {
+		t.Fatalf("expected client to build from WithAPIKey with no env key, got error: %v", err)
+	}
+	_, _ = c.GenerateCompletion(context.Background(), &CompletionRequest{Model: "m", Prompt: "hi"})
+	if gotAuth != "Bearer grok-from-option" {
+		t.Errorf("server saw Authorization %q", gotAuth)
+	}
+
+	t.Setenv("GROK_API_KEY", "")
+	if _, err := NewClient(context.Background(), "grok"); err == nil {
+		t.Error("expected error with no key")
 	}
 }
