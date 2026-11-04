@@ -68,7 +68,7 @@ func NewGrokClient(ctx context.Context, opts ClientOptions) (*GrokClient, error)
 	}
 
 	// Use the OpenAI client with custom base URL and custom HTTP client
-	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
+	httpClient := createCustomHTTPClient(opts.SkipVerifySSL, opts.WrapTransport)
 	return &GrokClient{
 		client: openai.NewClient(
 			option.WithAPIKey(apiKey),

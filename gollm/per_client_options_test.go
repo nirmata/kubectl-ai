@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -300,6 +301,46 @@ func TestConcurrentClientsAreIsolated(t *testing.T) {
 		})
 	}
 }
+
+// TestTransportWrapperComposesWithOptions checks the wrapper sees requests to
+// the per-client endpoint and the per-client key still reaches the server.
+func TestTransportWrapperComposesWithOptions(t *testing.T) {
+	for _, provider := range []string{"anthropic", "openai", "azopenai"} {
+		t.Run(provider, func(t *testing.T) {
+			decoy := newFakeProvider(t, provider)
+			target := newFakeProvider(t, provider)
+			populateEnv(t, provider, decoy.srv.URL)
+			targetHost := strings.TrimPrefix(strings.TrimPrefix(target.srv.URL, "https://"), "http://")
+
+			var hits, wrongHost atomic.Int32
+			wrap := WithTransportWrapper(func(base http.RoundTripper) http.RoundTripper {
+				return roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					hits.Add(1)
+					if r.URL.Host != targetHost {
+						wrongHost.Add(1)
+					}
+					return base.RoundTrip(r)
+				})
+			})
+			id, opts := clientArgs(provider, "opt-key", target.srv, wrap)
+			c, err := NewClient(context.Background(), id, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := exercise(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			if hits.Load() == 0 || wrongHost.Load() != 0 {
+				t.Fatalf("wrapper hits=%d wrongHost=%d", hits.Load(), wrongHost.Load())
+			}
+			assertKeys(t, target, wantHeader(provider, "opt-key"))
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // TestLegacyEnvOnlyPath checks that without per-client options the env-driven
 // configuration is used exactly as before.
