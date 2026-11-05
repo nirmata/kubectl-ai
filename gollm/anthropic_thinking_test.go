@@ -360,17 +360,18 @@ func TestAnthropicSend_History(t *testing.T) {
 // and so is one whose iterator the caller never runs, and an error response
 // whose body stalls; one that keeps sending for longer than streamIdle
 // completes, and so does a prompt one whose consumer spends longer than
-// streamIdle in a yield.
+// streamIdle in a yield, and one whose body stays open after message_stop.
 func TestAnthropicStream_IdleTimeout(t *testing.T) {
 	cases := map[string]struct {
-		silent, slowConsumer, unread bool
-		status                       int // sent before the body, if not 0
+		silent, slowConsumer, unread, openAfterStop bool
+		status                                      int // sent before the body, if not 0
 	}{
-		"silent":           {silent: true},
-		"slow but sending": {},
-		"slow consumer":    {slowConsumer: true},
-		"unread":           {silent: true, unread: true},
-		"stalled 500 body": {silent: true, status: http.StatusInternalServerError},
+		"silent":                  {silent: true},
+		"slow but sending":        {},
+		"slow consumer":           {slowConsumer: true},
+		"unread":                  {silent: true, unread: true},
+		"stalled 500 body":        {silent: true, status: http.StatusInternalServerError},
+		"open after message_stop": {openAfterStop: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -383,7 +384,11 @@ func TestAnthropicStream_IdleTimeout(t *testing.T) {
 				_, _ = io.WriteString(w, sse(`{"type":"ping"}`)) // so "silent" stalls on a later read, not the first
 				w.(http.Flusher).Flush()
 				switch {
-				case tc.silent:
+				case tc.silent, tc.openAfterStop:
+					if tc.openAfterStop { // a whole reply, then the body stays open
+						_, _ = io.WriteString(w, sse(textBlk, textDelta, evStop0, msgDelta("end_turn"), evMsgStop))
+						w.(http.Flusher).Flush()
+					}
 					select { // the client hangs up; the timer only ends a run without the watchdog
 					case <-r.Context().Done():
 						hungUp <- struct{}{}
@@ -451,8 +456,49 @@ func TestAnthropicStream_IdleTimeout(t *testing.T) {
 			if e := drain(t, it, err); tc.silent != (e != nil) {
 				t.Fatalf("silent=%v: got error %v", tc.silent, e)
 			}
-			if took := time.Since(start); tc.silent && took > 2*time.Second {
-				t.Fatalf("silent stream ended after %v, want about 200ms", took)
+			if took := time.Since(start); took > 2*time.Second {
+				t.Fatalf("stream ended after %v, want under 2s (a silent one after about 200ms)", took)
+			}
+		})
+	}
+}
+
+// (6) over HTTP/2 (what api.anthropic.com negotiates) the transport reports
+// ctx.Err(), so the timer's DeadlineExceeded cause must be restored.
+func TestAnthropicStream_IdleTimeoutHTTP2(t *testing.T) {
+	for name, silent := range map[string]bool{"stalled upload": false, "silent stream": true} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if silent {
+					_, _ = io.Copy(io.Discard, r.Body)
+					_, _ = io.WriteString(w, sse(`{"type":"ping"}`))
+					w.(http.Flusher).Flush()
+				}
+				select { // the client hangs up; the timer only ends a run without the watchdog
+				case <-r.Context().Done():
+				case <-time.After(3 * time.Second):
+				}
+			}))
+			srv.EnableHTTP2 = true
+			srv.StartTLS()
+			t.Cleanup(srv.Close)
+			populateEnv(t, "anthropic", srv.URL)
+			c, err := NewAnthropicClient(context.Background(), ClientOptions{SkipVerifySSL: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.streamIdle = 200 * time.Millisecond
+			prompt := "hi"
+			if !silent {
+				prompt = strings.Repeat("x", 2<<20) // more than the server's 1 MiB HTTP/2 window
+			}
+			start := time.Now()
+			it, err := c.StartChat("sys", "claude-test").SendStreaming(context.Background(), prompt)
+			if err == nil {
+				err = drain(t, it, nil)
+			}
+			if took := time.Since(start); took > 2*time.Second || !errors.Is(err, context.DeadlineExceeded) || !DefaultIsRetryableError(err) {
+				t.Fatalf("after %v got %v, want a retryable context.DeadlineExceeded after about 200ms", took, err)
 			}
 		})
 	}

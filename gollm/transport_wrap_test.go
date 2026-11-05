@@ -127,10 +127,6 @@ func TestTransportWrapper(t *testing.T) {
 			if !ok || tr == http.DefaultTransport || tr.Proxy == nil {
 				t.Fatalf("wrapper did not receive gollm's cloned transport: %T", base)
 			}
-			// A client with no Timeout (Anthropic's streamClient) relies on this to end a header stall.
-			if tr.ResponseHeaderTimeout < maxReplyWait {
-				t.Fatalf("transport ResponseHeaderTimeout=%v, want at least %v", tr.ResponseHeaderTimeout, maxReplyWait)
-			}
 		})
 	}
 }

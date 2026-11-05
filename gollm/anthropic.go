@@ -48,6 +48,10 @@ const (
 	defaultAnthropicMaxTokens = 16384
 )
 
+// maxReplyWait bounds a non-streaming reply, whose headers arrive only when
+// generation ends, and a stream's idle time.
+const maxReplyWait = 10 * time.Minute
+
 func anthropicMaxTokens() int {
 	v := os.Getenv(envAnthropicMaxTokens)
 	if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -111,9 +115,10 @@ type AnthropicClient struct {
 	// streamClient shares httpClient's transport but has no whole-body Timeout,
 	// which would cut off a long response. SendStreaming and Send use it.
 	streamClient *http.Client
-	// streamIdle bounds SendStreaming after the response headers: an error body
-	// must arrive in full, and the iterator must start, within streamIdle of them;
-	// then each SSE line must arrive within streamIdle. Otherwise the body is closed.
+	// streamIdle bounds SendStreaming: the upload and the wait for response headers
+	// must end within streamIdle; an error body must then arrive in full, and the
+	// iterator must start, within streamIdle of the headers; then each SSE line
+	// must arrive within streamIdle. Otherwise the request is cancelled.
 	streamIdle time.Duration
 	apiKey     string
 }
@@ -142,12 +147,13 @@ func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClie
 	httpClient := createCustomHTTPClient(opts.SkipVerifySSL, opts.WrapTransport)
 
 	streamClient := *httpClient
-	// The transport still bounds connect, TLS and the wait for response headers.
-	// After headers, Send has its own deadline. SendStreaming starts its idle timer
-	// when the headers arrive: it closes an error body not read in full within
-	// streamIdle, a stream that goes silent for streamIdle, or one whose iterator
-	// nobody starts reading within streamIdle. A stream that is read and keeps
-	// sending runs until the caller's ctx ends.
+	// The transport still bounds connect and TLS.
+	// Send has its own deadline. SendStreaming starts its idle timer
+	// before the request is sent: it ends an upload and header wait that last
+	// longer than streamIdle, an error body not read in full within streamIdle, a
+	// stream that goes silent for streamIdle, or one whose iterator nobody starts
+	// reading within streamIdle. A stream that is read and keeps sending runs
+	// until the caller's ctx ends.
 	streamClient.Timeout = 0
 
 	client := &AnthropicClient{
@@ -769,9 +775,11 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 	reqURL := u.String()
 	klog.V(1).Infof("Sending streaming POST request to: %s", reqURL)
 
-	// Create HTTP request
+	// Create HTTP request; the idle timer below cancels its context.
+	ctx, cancel := context.WithCancelCause(ctx)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
+		cancel(nil)
 		klog.Errorf("Failed to create streaming HTTP request: %v", err)
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -782,22 +790,32 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 	httpReq.Header.Set("anthropic-version", anthropicAPIVersion)
 	klog.V(2).Infof("Streaming request headers set")
 
+	// Nothing else bounds the upload, the header wait or the body after its
+	// headers. Cancel an upload and header wait longer than streamIdle; then, re-armed at the headers, an
+	// error body not read in full within streamIdle, a stream that goes silent
+	// for streamIdle, or one whose iterator is not run within streamIdle.
+	idle := time.AfterFunc(c.client.streamIdle, func() { cancel(context.DeadlineExceeded) })
+
 	// Execute request
 	klog.V(1).Info("Executing streaming HTTP request to Anthropic API")
 	httpResp, err := c.client.streamClient.Do(httpReq)
 	if err != nil {
+		idle.Stop()
+		// Keep Do's own error, with its password-redacted URL; HTTP/2 reports ctx.Err() (Canceled), not the cause.
+		var ue *url.Error
+		if cause := context.Cause(ctx); cause != nil && errors.As(err, &ue) {
+			ue.Err = cause
+		}
+		cancel(nil)
 		klog.Errorf("Streaming HTTP request failed: %v", err)
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
+	idle.Reset(c.client.streamIdle)
 	klog.V(1).Infof("Streaming HTTP response received: status=%d", httpResp.StatusCode)
-
-	// Nothing else bounds the body after its headers: close an error body not read
-	// in full within streamIdle, a stream that goes silent for streamIdle, or one
-	// whose iterator is not run within streamIdle.
-	idle := time.AfterFunc(c.client.streamIdle, func() { httpResp.Body.Close() })
 
 	// Handle non-200 responses
 	if httpResp.StatusCode != http.StatusOK {
+		defer cancel(nil)
 		defer httpResp.Body.Close()
 		body, _ := io.ReadAll(httpResp.Body)
 		idle.Stop()
@@ -812,6 +830,7 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 	// Return streaming iterator
 	klog.V(1).Info("Creating streaming iterator")
 	return func(yield func(ChatResponse, error) bool) {
+		defer cancel(nil)
 		defer httpResp.Body.Close()
 		committed := false
 		// An errored reply is dropped, but a tool_result turn is kept: without it the
@@ -840,7 +859,8 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 		scanner.Buffer(nil, 16<<20)
 		eventCount := 0
 
-		for {
+		// Stop at message_stop: a proxy may hold the body open after it.
+		for !sawStop {
 			// Re-armed for each read and stopped after it: time the caller spends in
 			// yield is not silence.
 			idle.Reset(c.client.streamIdle)
@@ -1042,7 +1062,6 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 
 			case "message_stop":
 				sawStop = true
-				content = content[:0]
 				for _, i := range slices.Sorted(maps.Keys(blocks)) {
 					b := *blocks[i]
 					if tb := textByIndex[i]; tb != nil {
@@ -1080,6 +1099,9 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 		}
 
 		if err := scanner.Err(); err != nil {
+			if cause := context.Cause(ctx); cause != nil { // HTTP/2 reports ctx.Err() (Canceled), not the cause
+				err = cause
+			}
 			klog.Errorf("Scanner error during streaming: %v", err)
 			yield(nil, fmt.Errorf("scanner error: %w", err))
 			return
@@ -1089,6 +1111,11 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 			yield(nil, errors.New("stream ended before message_stop: response incomplete"))
 			return
 		}
+		// Read the body's end so HTTP/1.1 can reuse the connection (an early Close
+		// often drops it, even on Go 1.27); a body held open costs at most 50ms.
+		idle.Reset(50 * time.Millisecond)
+		_, _ = io.CopyN(io.Discard, httpResp.Body, 256<<10)
+		idle.Stop()
 
 		klog.V(1).Infof("Streaming completed: textBlocks=%d, toolUses=%d, totalEvents=%d", len(textByIndex), len(toolUses), eventCount)
 
