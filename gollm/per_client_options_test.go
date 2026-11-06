@@ -46,7 +46,8 @@ func (f *fakeProvider) seen() []string {
 const (
 	anthropicMessageJSON = `{"id":"m","type":"message","role":"assistant","model":"x",` +
 		`"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
-	anthropicStreamBody = `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}` + "\n\n" +
+	anthropicStreamBody = `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}` + "\n\n" +
 		`data: {"type":"message_stop"}` + "\n\n"
 	openAICompletionJSON = `{"id":"c","object":"chat.completion","created":0,"model":"m",` +
 		`"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`

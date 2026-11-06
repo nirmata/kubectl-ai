@@ -90,6 +90,11 @@ func TestTransportWrapper(t *testing.T) {
 				t.Fatal(err)
 			}
 			resp.Body.Close()
+			// Send and SendStreaming use streamClient: same wrapped transport, no whole-body Timeout.
+			if c.streamClient.Transport != c.httpClient.Transport || c.streamClient.Timeout != 0 || c.httpClient.Timeout == 0 {
+				t.Fatalf("streamClient transport shared=%v timeout=%v; httpClient timeout=%v",
+					c.streamClient.Transport == c.httpClient.Transport, c.streamClient.Timeout, c.httpClient.Timeout)
+			}
 		},
 		"llamacpp": func(t *testing.T) {
 			t.Setenv("LLAMACPP_HOST", srv.URL)
