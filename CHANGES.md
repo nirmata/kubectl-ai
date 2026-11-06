@@ -50,14 +50,14 @@ This fork extends kubectl-ai with additional features and security enhancements 
 **Configuration**:
 - API key via `ANTHROPIC_API_KEY` environment variable
 - Optional base URL via `ANTHROPIC_BASE_URL` environment variable or `ClientOptions.URL`
-- Optional model selection via `ANTHROPIC_MODEL` environment variable
+- Optional model selection via `ANTHROPIC_MODEL` environment variable, used when the caller passes no model
 - Optional output cap via `ANTHROPIC_MAX_TOKENS` environment variable (default 16384; thinking tokens count against it). Above about 21,000, a non-streaming `Send` is likely to reach its 10-minute bound
-- Default model: `claude-sonnet-4-20250514`
+- Default model, when the caller passes no model and `ANTHROPIC_MODEL` is unset: `claude-sonnet-5-5`
 
 **Usage**: 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-kubectl-ai --provider anthropic --model claude-sonnet-4-20250514
+kubectl-ai --llm-provider=anthropic --model=claude-sonnet-5-5
 ```
 
 **Implementation Details**:
