@@ -42,7 +42,7 @@ const (
 	envAnthropicMaxTokens = "ANTHROPIC_MAX_TOKENS"
 
 	defaultAnthropicBaseURL = "https://api.anthropic.com"
-	defaultAnthropicModel   = "claude-sonnet-4-20250514"
+	defaultAnthropicModel   = "claude-sonnet-5-5"
 	anthropicAPIVersion     = "2023-06-01"
 	// Thinking tokens count against max_tokens, so the cap leaves room for both thinking and text.
 	defaultAnthropicMaxTokens = 16384
@@ -225,11 +225,9 @@ func (c *AnthropicClient) SetResponseSchema(schema *Schema) error {
 }
 
 var anthropicHardcodedModels = []string{
-	"claude-sonnet-4-20250514",
-	"claude-3-7-sonnet-20250219",
-	"claude-3-5-sonnet-20241022",
-	"claude-3-opus-20240229",
-	"claude-3-haiku-20240307",
+	defaultAnthropicModel,
+	"claude-opus-5-5",
+	"claude-haiku-5-5",
 }
 
 // Retrieves list of supported Anthropic models by querying the API

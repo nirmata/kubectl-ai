@@ -503,3 +503,25 @@ func TestAnthropicStream_IdleTimeoutHTTP2(t *testing.T) {
 		})
 	}
 }
+
+// Pins the default model (a retired default 404s every request that falls back
+// to it) and that the ListModels fallback leads with it.
+func TestAnthropicDefaultModel(t *testing.T) {
+	const want = "claude-sonnet-5-5"
+	t.Setenv("ANTHROPIC_MODEL", "")
+	if got := getAnthropicModel(""); got != want {
+		t.Fatalf("getAnthropicModel(\"\")=%q want %q", got, want)
+	}
+
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	populateEnv(t, "anthropic", srv.URL)
+	c, err := NewAnthropicClient(context.Background(), ClientOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, err := c.ListModels(context.Background())
+	if err != nil || len(models) == 0 || models[0] != want {
+		t.Fatalf("ListModels fallback=%v err=%v, want first %q", models, err, want)
+	}
+}
