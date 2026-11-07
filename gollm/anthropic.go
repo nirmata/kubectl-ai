@@ -22,10 +22,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/api"
 	"k8s.io/klog/v2"
@@ -34,11 +38,63 @@ import (
 const (
 	envAnthropicBaseURL = "ANTHROPIC_BASE_URL"
 	envAnthropicModel   = "ANTHROPIC_MODEL"
+	// envAnthropicMaxTokens overrides the per-request max_tokens cap.
+	envAnthropicMaxTokens = "ANTHROPIC_MAX_TOKENS"
 
 	defaultAnthropicBaseURL = "https://api.anthropic.com"
-	defaultAnthropicModel   = "claude-sonnet-4-20250514"
+	defaultAnthropicModel   = "claude-sonnet-5-5"
 	anthropicAPIVersion     = "2023-06-01"
+	// Thinking tokens count against max_tokens, so the cap leaves room for both thinking and text.
+	defaultAnthropicMaxTokens = 16384
 )
+
+// maxReplyWait bounds a non-streaming reply, whose headers arrive only when
+// generation ends, and a stream's idle time.
+const maxReplyWait = 10 * time.Minute
+
+func anthropicMaxTokens() int {
+	v := os.Getenv(envAnthropicMaxTokens)
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return n
+	}
+	if v != "" {
+		klog.Warningf("Ignoring invalid %s=%q, using %d", envAnthropicMaxTokens, v, defaultAnthropicMaxTokens)
+	}
+	return defaultAnthropicMaxTokens
+}
+
+// anthropicStopError reports a response that must not be used: a max_tokens or
+// context-window stop that cut off a tool_use (the last block) or left no
+// content, or any refusal, whose partial output must be discarded. A truncated
+// reply that still ends in usable text is kept, with a warning.
+// content is the reply's blocks in index order.
+func anthropicStopError(stopReason string, content []anthropicContentBlock) error {
+	switch stopReason {
+	case "max_tokens", "model_context_window_exceeded":
+		hint := "the conversation filled the model's context window"
+		if stopReason == "max_tokens" {
+			hint = "raise " + envAnthropicMaxTokens
+		}
+		hasContent, lastType := false, ""
+		for _, b := range content {
+			hasContent = hasContent || b.Type == "tool_use" || (b.Type == "text" && b.Text != "")
+			lastType = b.Type
+		}
+		if lastType == "tool_use" || !hasContent {
+			return fmt.Errorf("response truncated: stop_reason=%s cut off the output (last block %q); %s", stopReason, lastType, hint)
+		}
+		klog.Warningf("Response truncated: stop_reason=%s; returning the partial reply (%s)", stopReason, hint)
+	case "refusal":
+		return errors.New("response refused: stop_reason=refusal (partial output discarded)")
+	}
+	return nil
+}
+
+func hasToolResult(blocks []anthropicContentBlock) bool {
+	return slices.ContainsFunc(blocks, func(b anthropicContentBlock) bool { return b.Type == "tool_result" })
+}
+
+func isEmptyText(b anthropicContentBlock) bool { return b.Type == "text" && b.Text == "" }
 
 // Registers the Anthropic provider factory on package initialization
 func init() {
@@ -56,6 +112,14 @@ func newAnthropicClientFactory(ctx context.Context, opts ClientOptions) (Client,
 type AnthropicClient struct {
 	baseURL    *url.URL
 	httpClient *http.Client
+	// streamClient shares httpClient's transport but has no whole-body Timeout,
+	// which would cut off a long response. SendStreaming and Send use it.
+	streamClient *http.Client
+	// streamIdle bounds SendStreaming: the upload and the wait for response headers
+	// must end within streamIdle; an error body must then arrive in full, and the
+	// iterator must start, within streamIdle of the headers; then each SSE line
+	// must arrive within streamIdle. Otherwise the request is cancelled.
+	streamIdle time.Duration
 	apiKey     string
 }
 
@@ -82,10 +146,22 @@ func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClie
 
 	httpClient := createCustomHTTPClient(opts.SkipVerifySSL, opts.WrapTransport)
 
+	streamClient := *httpClient
+	// The transport still bounds connect and TLS.
+	// Send has its own deadline. SendStreaming starts its idle timer
+	// before the request is sent: it ends an upload and header wait that last
+	// longer than streamIdle, an error body not read in full within streamIdle, a
+	// stream that goes silent for streamIdle, or one whose iterator nobody starts
+	// reading within streamIdle. A stream that is read and keeps sending runs
+	// until the caller's ctx ends.
+	streamClient.Timeout = 0
+
 	client := &AnthropicClient{
-		baseURL:    baseURL,
-		httpClient: httpClient,
-		apiKey:     apiKey,
+		baseURL:      baseURL,
+		httpClient:   httpClient,
+		streamClient: &streamClient,
+		streamIdle:   maxReplyWait,
+		apiKey:       apiKey,
 	}
 
 	return client, nil
@@ -149,11 +225,9 @@ func (c *AnthropicClient) SetResponseSchema(schema *Schema) error {
 }
 
 var anthropicHardcodedModels = []string{
-	"claude-sonnet-4-20250514",
-	"claude-3-7-sonnet-20250219",
-	"claude-3-5-sonnet-20241022",
-	"claude-3-opus-20240229",
-	"claude-3-haiku-20240307",
+	defaultAnthropicModel,
+	"claude-opus-5-5",
+	"claude-haiku-5-5",
 }
 
 // Retrieves list of supported Anthropic models by querying the API
@@ -231,14 +305,53 @@ type anthropicMessage struct {
 }
 
 type anthropicContentBlock struct {
-	Type        string                 `json:"type"`
-	Text        string                 `json:"text,omitempty"`
-	PartialJSON string                 `json:"partial_json,omitempty"`
-	ID          string                 `json:"id,omitempty"`
-	ToolUseID   string                 `json:"tool_use_id,omitempty"`
-	Name        string                 `json:"name,omitempty"`
-	Input       map[string]interface{} `json:"input,omitempty"`
-	Content     interface{}            `json:"content,omitempty"`
+	Type      string                 `json:"type"`
+	Text      string                 `json:"text,omitempty"`
+	ID        string                 `json:"id,omitempty"`
+	ToolUseID string                 `json:"tool_use_id,omitempty"`
+	Name      string                 `json:"name,omitempty"`
+	Input     map[string]interface{} `json:"input,omitempty"`
+	Content   interface{}            `json:"content,omitempty"`
+	// Thinking, Signature and Data belong to thinking / redacted_thinking blocks.
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
+}
+
+// MarshalJSON always emits thinking and signature on a thinking block and input
+// on a tool_use block (even when empty, as the API requires), without leaking
+// those keys onto other block types.
+func (b anthropicContentBlock) MarshalJSON() ([]byte, error) {
+	switch b.Type {
+	case "thinking":
+		return json.Marshal(struct {
+			Type      string `json:"type"`
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature"`
+		}{b.Type, b.Thinking, b.Signature})
+	case "tool_use":
+		if b.Input == nil {
+			b.Input = map[string]interface{}{}
+		}
+		return json.Marshal(struct {
+			Type  string                 `json:"type"`
+			ID    string                 `json:"id"`
+			Name  string                 `json:"name"`
+			Input map[string]interface{} `json:"input"`
+		}{b.Type, b.ID, b.Name, b.Input})
+	}
+	type plain anthropicContentBlock
+	return json.Marshal(plain(b))
+}
+
+// anthropicStreamDelta is the "delta" payload of content_block_delta and message_delta events.
+type anthropicStreamDelta struct {
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
+	Signature   string `json:"signature,omitempty"`
+	StopReason  string `json:"stop_reason,omitempty"`
 }
 
 type anthropicRequest struct {
@@ -277,8 +390,9 @@ type anthropicStreamEvent struct {
 	Type         string                 `json:"type"` // "message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"
 	Message      *anthropicResponse     `json:"message,omitempty"`
 	ContentBlock *anthropicContentBlock `json:"content_block,omitempty"`
-	Delta        *anthropicContentBlock `json:"delta,omitempty"`
+	Delta        *anthropicStreamDelta  `json:"delta,omitempty"`
 	Usage        *anthropicUsage        `json:"usage,omitempty"`
+	Error        anthropicError         `json:"error"` // set on an "error" event
 	Index        int                    `json:"index,omitempty"`
 }
 
@@ -509,7 +623,7 @@ func (c *anthropicChat) Send(ctx context.Context, contents ...any) (ChatResponse
 	// Prepare the request
 	reqBody := anthropicRequest{
 		Model:     c.model,
-		MaxTokens: 4096,
+		MaxTokens: anthropicMaxTokens(),
 		Messages:  tempMessages,
 	}
 
@@ -533,6 +647,11 @@ func (c *anthropicChat) Send(ctx context.Context, contents ...any) (ChatResponse
 	u := c.client.baseURL.JoinPath("v1", "messages")
 	reqURL := u.String()
 
+	// A non-streaming reply sends its headers only when generation ends, so a
+	// 180 s client Timeout would cut off a long reply; allow maxReplyWait instead.
+	ctx, cancel := context.WithTimeout(ctx, maxReplyWait)
+	defer cancel()
+
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
@@ -546,7 +665,7 @@ func (c *anthropicChat) Send(ctx context.Context, contents ...any) (ChatResponse
 	httpReq.Header.Set("anthropic-version", anthropicAPIVersion)
 
 	// Execute request
-	httpResp, err := c.client.httpClient.Do(httpReq)
+	httpResp, err := c.client.streamClient.Do(httpReq)
 	if err != nil {
 		klog.Errorf("HTTP request failed: %v", err)
 		return nil, fmt.Errorf("executing request: %w", err)
@@ -574,20 +693,21 @@ func (c *anthropicChat) Send(ctx context.Context, contents ...any) (ChatResponse
 	klog.V(1).Infof("Response parsed: ID=%s, Role=%s, ContentBlocks=%d, StopReason=%s, Usage={Input:%d, Output:%d}",
 		resp.ID, resp.Role, len(resp.Content), resp.StopReason, resp.Usage.InputTokens, resp.Usage.OutputTokens)
 
-	// Only commit to conversation history if the request succeeded
-	if len(contentBlocks) > 0 {
-		c.messages = append(c.messages, anthropicMessage{
-			Role:    "user",
-			Content: contentBlocks,
-		})
+	// Commit the user turn if the request succeeded, or if it holds a tool_result:
+	// the previous tool_use needs its result even when this reply is dropped.
+	stopErr := anthropicStopError(resp.StopReason, resp.Content)
+	if len(contentBlocks) > 0 && (stopErr == nil || hasToolResult(contentBlocks)) {
+		c.messages = append(c.messages, anthropicMessage{Role: "user", Content: contentBlocks})
+	}
+	if stopErr != nil {
+		return nil, stopErr
 	}
 
-	// Update conversation history with assistant's response
-	assistantMsg := anthropicMessage{
-		Role:    "assistant",
-		Content: resp.Content,
+	// Empty text blocks are dropped and an empty reply adds no message, as in
+	// streaming; resp goes back unchanged.
+	if content := slices.DeleteFunc(slices.Clone(resp.Content), isEmptyText); len(content) > 0 {
+		c.messages = append(c.messages, anthropicMessage{Role: "assistant", Content: content})
 	}
-	c.messages = append(c.messages, assistantMsg)
 
 	// Return response
 	klog.V(1).Info("Returning Anthropic response wrapper")
@@ -625,7 +745,7 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 	// Prepare the streaming request
 	reqBody := anthropicRequest{
 		Model:     c.model,
-		MaxTokens: 4096,
+		MaxTokens: anthropicMaxTokens(),
 		Messages:  tempMessages,
 		Stream:    true,
 	}
@@ -653,9 +773,11 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 	reqURL := u.String()
 	klog.V(1).Infof("Sending streaming POST request to: %s", reqURL)
 
-	// Create HTTP request
+	// Create HTTP request; the idle timer below cancels its context.
+	ctx, cancel := context.WithCancelCause(ctx)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
+		cancel(nil)
 		klog.Errorf("Failed to create streaming HTTP request: %v", err)
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -666,19 +788,35 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 	httpReq.Header.Set("anthropic-version", anthropicAPIVersion)
 	klog.V(2).Infof("Streaming request headers set")
 
+	// Nothing else bounds the upload, the header wait or the body after its
+	// headers. Cancel an upload and header wait longer than streamIdle; then, re-armed at the headers, an
+	// error body not read in full within streamIdle, a stream that goes silent
+	// for streamIdle, or one whose iterator is not run within streamIdle.
+	idle := time.AfterFunc(c.client.streamIdle, func() { cancel(context.DeadlineExceeded) })
+
 	// Execute request
 	klog.V(1).Info("Executing streaming HTTP request to Anthropic API")
-	httpResp, err := c.client.httpClient.Do(httpReq)
+	httpResp, err := c.client.streamClient.Do(httpReq)
 	if err != nil {
+		idle.Stop()
+		// Keep Do's own error, with its password-redacted URL; HTTP/2 reports ctx.Err() (Canceled), not the cause.
+		var ue *url.Error
+		if cause := context.Cause(ctx); cause != nil && errors.As(err, &ue) {
+			ue.Err = cause
+		}
+		cancel(nil)
 		klog.Errorf("Streaming HTTP request failed: %v", err)
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
+	idle.Reset(c.client.streamIdle)
 	klog.V(1).Infof("Streaming HTTP response received: status=%d", httpResp.StatusCode)
 
 	// Handle non-200 responses
 	if httpResp.StatusCode != http.StatusOK {
+		defer cancel(nil)
 		defer httpResp.Body.Close()
 		body, _ := io.ReadAll(httpResp.Body)
+		idle.Stop()
 		klog.Errorf("Anthropic streaming API returned error: status=%d, body=%s", httpResp.StatusCode, string(body))
 		var errorResp anthropicErrorResponse
 		if err := json.Unmarshal(body, &errorResp); err == nil {
@@ -690,19 +828,45 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 	// Return streaming iterator
 	klog.V(1).Info("Creating streaming iterator")
 	return func(yield func(ChatResponse, error) bool) {
+		defer cancel(nil)
 		defer httpResp.Body.Close()
+		committed := false
+		// An errored reply is dropped, but a tool_result turn is kept: without it the
+		// previous tool_use has no result and the API rejects every later request.
+		defer func() {
+			if !committed && hasToolResult(contentBlocks) {
+				c.messages = append(c.messages, anthropicMessage{Role: "user", Content: contentBlocks})
+			}
+		}()
 
-		var fullContent strings.Builder
 		var toolUses []anthropicContentBlock
 		var usage *anthropicUsage
 		// Track partial tool inputs by tool ID for accumulating input_json_delta events
 		partialToolInputs := make(map[string]*strings.Builder)
 		// Map content block index to tool ID (since event.Index is content block index, not toolUses index)
 		contentBlockIndexToToolID := make(map[int]string)
+		// Every block by content-block index, so history keeps the order received.
+		blocks := make(map[int]*anthropicContentBlock)
+		textByIndex := make(map[int]*strings.Builder)
+		thinkByIndex := make(map[int]*strings.Builder)
+		var content []anthropicContentBlock // every block with its deltas, built at message_stop
+		stopReason := ""
+		sawStop := false
 		scanner := bufio.NewScanner(httpResp.Body)
+		// A thinking signature arrives as one SSE line that grows with the thinking.
+		scanner.Buffer(nil, 16<<20)
 		eventCount := 0
 
-		for scanner.Scan() {
+		// Stop at message_stop: a proxy may hold the body open after it.
+		for !sawStop {
+			// Re-armed for each read and stopped after it: time the caller spends in
+			// yield is not silence.
+			idle.Reset(c.client.streamIdle)
+			more := scanner.Scan()
+			idle.Stop()
+			if !more {
+				break
+			}
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
 				continue
@@ -732,8 +896,15 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 				if event.Delta != nil {
 					// Anthropic uses "text_delta" for streaming text deltas, not "text"
 					if (event.Delta.Type == "text" || event.Delta.Type == "text_delta") && event.Delta.Text != "" {
+						if blocks[event.Index] == nil { // as the SDK accumulators do: no start, no block to add to
+							yield(nil, fmt.Errorf("stream: %s for content block %d before its content_block_start", event.Delta.Type, event.Index))
+							return
+						}
 						klog.V(2).Infof("Received text delta: len=%d, preview=%q", len(event.Delta.Text), event.Delta.Text)
-						fullContent.WriteString(event.Delta.Text)
+						if textByIndex[event.Index] == nil {
+							textByIndex[event.Index] = &strings.Builder{}
+						}
+						textByIndex[event.Index].WriteString(event.Delta.Text)
 						response := &anthropicStreamResponse{
 							content: event.Delta.Text,
 							model:   c.model,
@@ -744,6 +915,13 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 							klog.V(2).Info("Yield function returned false, stopping stream")
 							return
 						}
+					} else if b := blocks[event.Index]; b != nil && event.Delta.Type == "thinking_delta" {
+						if thinkByIndex[event.Index] == nil {
+							thinkByIndex[event.Index] = &strings.Builder{}
+						}
+						thinkByIndex[event.Index].WriteString(event.Delta.Thinking)
+					} else if b != nil && event.Delta.Type == "signature_delta" {
+						b.Signature += event.Delta.Signature
 					} else if event.Delta.Type == "input_json_delta" {
 						// Handle streaming tool input JSON deltas
 						// event.Index is the content block index, not the toolUses index
@@ -779,6 +957,7 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 
 			case "content_block_start":
 				if event.ContentBlock != nil {
+					blocks[event.Index] = event.ContentBlock
 					if event.ContentBlock.Type == "tool_use" {
 						// Start of tool use - initialize
 						toolUses = append(toolUses, *event.ContentBlock)
@@ -855,13 +1034,15 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 						done:     false,
 						toolUses: []anthropicContentBlock{toolUses[toolUseIndex]},
 					}
+					// Keep the finalized tool_use as the block that goes back into history.
+					*blocks[event.Index] = toolUses[toolUseIndex]
 					if !yield(response, nil) {
 						klog.V(2).Info("Yield function returned false after tool use, stopping stream")
 						return
 					}
 					delete(partialToolInputs, toolID)
 					delete(contentBlockIndexToToolID, event.Index)
-				} else {
+				} else if blocks[event.Index] == nil {
 					klog.V(2).Infof("content_block_stop event with invalid content block index %d (toolID=%s, toolUseIndex=%d, toolUses len=%d)", event.Index, toolID, toolUseIndex, len(toolUses))
 				}
 
@@ -869,12 +1050,30 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 				klog.V(1).Infof("message_delta event: Usage=%+v", event.Usage)
 				// Message-level updates (e.g., stop reason)
 				// Usage is provided in message_delta, not message_stop
+				if event.Delta != nil && event.Delta.StopReason != "" {
+					stopReason = event.Delta.StopReason
+				}
 				if event.Usage != nil {
 					usage = event.Usage
 					klog.V(2).Infof("Received usage in message_delta: Input=%d, Output=%d", usage.InputTokens, usage.OutputTokens)
 				}
 
 			case "message_stop":
+				sawStop = true
+				for _, i := range slices.Sorted(maps.Keys(blocks)) {
+					b := *blocks[i]
+					if tb := textByIndex[i]; tb != nil {
+						b.Text += tb.String()
+					}
+					if tb := thinkByIndex[i]; tb != nil {
+						b.Thinking += tb.String()
+					}
+					content = append(content, b)
+				}
+				if err := anthropicStopError(stopReason, content); err != nil {
+					yield(nil, err)
+					return
+				}
 				// Final message - yield final response with usage if available
 				finalResponse := &anthropicStreamResponse{
 					content: "",
@@ -888,20 +1087,38 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 					klog.V(2).Info("Stream completed but no usage metadata available")
 				}
 				yield(finalResponse, nil)
+			case "error":
+				// e.g. overloaded_error mid-stream: the output is incomplete, so commit nothing.
+				yield(nil, fmt.Errorf("stream error: %s: %s", event.Error.Type, event.Error.Message))
+				return
 			default:
 				klog.V(2).Infof("Unhandled event type: %s", event.Type)
 			}
 		}
 
 		if err := scanner.Err(); err != nil {
+			if cause := context.Cause(ctx); cause != nil { // HTTP/2 reports ctx.Err() (Canceled), not the cause
+				err = cause
+			}
 			klog.Errorf("Scanner error during streaming: %v", err)
 			yield(nil, fmt.Errorf("scanner error: %w", err))
 			return
 		}
+		if !sawStop {
+			// The body ended cleanly but early (e.g. a proxy closed it): the output is incomplete.
+			yield(nil, errors.New("stream ended before message_stop: response incomplete"))
+			return
+		}
+		// Read the body's end so HTTP/1.1 can reuse the connection (an early Close
+		// often drops it, even on Go 1.27); a body held open costs at most 50ms.
+		idle.Reset(50 * time.Millisecond)
+		_, _ = io.CopyN(io.Discard, httpResp.Body, 256<<10)
+		idle.Stop()
 
-		klog.V(1).Infof("Streaming completed: fullContentLen=%d, toolUses=%d, totalEvents=%d", fullContent.Len(), len(toolUses), eventCount)
+		klog.V(1).Infof("Streaming completed: textBlocks=%d, toolUses=%d, totalEvents=%d", len(textByIndex), len(toolUses), eventCount)
 
 		// Only commit to conversation history if the streaming succeeded
+		committed = true
 		if len(contentBlocks) > 0 {
 			c.messages = append(c.messages, anthropicMessage{
 				Role:    "user",
@@ -911,18 +1128,10 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 		}
 
 		// Update conversation history with the full response
-		assistantContent := []anthropicContentBlock{}
-		if fullContent.Len() > 0 {
-			assistantContent = append(assistantContent, anthropicContentBlock{
-				Type: "text",
-				Text: fullContent.String(),
-			})
-			klog.V(1).Infof("Added text content to assistant message: len=%d", fullContent.Len())
-		}
-		assistantContent = append(assistantContent, toolUses...)
-		if len(toolUses) > 0 {
-			klog.V(1).Infof("Added %d tool uses to assistant message", len(toolUses))
-		}
+		// Blocks go back in index order (empty text blocks dropped). Thinking and
+		// redacted_thinking pass through whole; any other block type keeps only its
+		// content_block_start fields, without deltas.
+		assistantContent := slices.DeleteFunc(content, isEmptyText)
 
 		if len(assistantContent) > 0 {
 			c.messages = append(c.messages, anthropicMessage{
