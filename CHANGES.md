@@ -53,6 +53,7 @@ This fork extends kubectl-ai with additional features and security enhancements 
 - Optional model selection via `ANTHROPIC_MODEL` environment variable, used when the caller passes no model
 - Optional output cap via `ANTHROPIC_MAX_TOKENS` environment variable (default 16384; thinking tokens count against it). Above about 21,000, a non-streaming `Send` is likely to reach its 10-minute bound
 - Default model, when the caller passes no model and `ANTHROPIC_MODEL` is unset: `claude-sonnet-5-5`
+- Optional `gollm.WithAnthropicThinkingType` (`adaptive`, `disabled`, `between_tools`) and `gollm.WithAnthropicEffort` (`low`, `medium`, `high`, `xhigh`, `max`), sent as the request's `thinking.type` and `output_config.effort` exactly as set; unset leaves the field off. Which value a model accepts is up to the API (for example `disabled` is rejected on some models), and a 400 is not retried
 
 **Usage**: 
 ```bash

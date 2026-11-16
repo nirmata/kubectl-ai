@@ -169,6 +169,15 @@ kubectl-ai --llm-provider=anthropic --model=claude-sonnet-5-5
 
 The Anthropic provider supports configurable base URLs to work with proxies or gateways. If `ANTHROPIC_BASE_URL` is not set, it defaults to `https://api.anthropic.com`.
 
+Callers of the Go API can set the request's `thinking.type` (`adaptive`, `disabled` or `between_tools`) with `gollm.WithAnthropicThinkingType` and `output_config.effort` (`low`, `medium`, `high`, `xhigh` or `max`) with `gollm.WithAnthropicEffort`. Each is sent exactly as set, and left off the request when unset. The API decides which value a model accepts, and a rejected one comes back as a 400 that is not retried:
+
+| Model | Value that turns up-front thinking off |
+|-------|----------------------------------------|
+| Sonnet 5 | `disabled` |
+| Haiku 5.5, Opus 5 (at `high` effort or below) | `disabled` |
+| Sonnet 5.5 (at `high` effort or below) | `between_tools` |
+| Opus 5.5 | none; use `output_config.effort` |
+
 #### Using Azure OpenAI
 
 You can also use Azure OpenAI deployment by setting your OpenAI API key and specifying the provider:

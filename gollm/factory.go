@@ -77,6 +77,14 @@ type ClientOptions struct {
 	// gemini also builds its client via createCustomHTTPClient but passes a nil
 	// wrapper. Not applied by providers with their own client (vertexai, bedrock).
 	WrapTransport func(http.RoundTripper) http.RoundTripper
+	// AnthropicThinkingType, when non-empty, is sent as the anthropic request's
+	// thinking.type (adaptive, disabled or between_tools). Empty omits the
+	// field, so the model's default applies. Other providers ignore it.
+	AnthropicThinkingType string
+	// AnthropicEffort, when non-empty, is sent as the anthropic request's
+	// output_config.effort (low, medium, high, xhigh or max). Empty leaves it
+	// off the request. Other providers ignore it.
+	AnthropicEffort string
 	// ProviderConfig carries provider-specific settings for providers
 	// registered outside gollm (via RegisterProvider). gollm's own providers
 	// ignore it. See WithProviderConfig.
@@ -200,6 +208,25 @@ func WithProviderConfig(cfg any) Option {
 func WithTransportWrapper(wrap func(base http.RoundTripper) http.RoundTripper) Option {
 	return func(o *ClientOptions) {
 		o.WrapTransport = wrap
+	}
+}
+
+// WithAnthropicThinkingType sets the anthropic request's thinking.type:
+// adaptive, disabled or between_tools; NewClient returns an error for any
+// other value. The value is sent as given, and the API decides which one a
+// model accepts (see the table in README.md).
+func WithAnthropicThinkingType(thinkingType string) Option {
+	return func(o *ClientOptions) {
+		o.AnthropicThinkingType = thinkingType
+	}
+}
+
+// WithAnthropicEffort sets the anthropic request's output_config.effort:
+// low, medium, high, xhigh or max; NewClient returns an error for any other
+// value.
+func WithAnthropicEffort(effort string) Option {
+	return func(o *ClientOptions) {
+		o.AnthropicEffort = effort
 	}
 }
 

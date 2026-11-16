@@ -120,7 +120,10 @@ type AnthropicClient struct {
 	// iterator must start, within streamIdle of the headers; then each SSE line
 	// must arrive within streamIdle. Otherwise the request is cancelled.
 	streamIdle time.Duration
-	apiKey     string
+	// thinkingType and effort are sent as set; empty leaves the field off.
+	thinkingType string
+	effort       string
+	apiKey       string
 }
 
 var _ Client = &AnthropicClient{}
@@ -144,6 +147,13 @@ func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClie
 		return nil, err
 	}
 
+	if opts.AnthropicThinkingType != "" && !slices.Contains(anthropicThinkingTypes, opts.AnthropicThinkingType) {
+		return nil, fmt.Errorf("invalid anthropic thinking type %q, want one of %v", opts.AnthropicThinkingType, anthropicThinkingTypes)
+	}
+	if opts.AnthropicEffort != "" && !slices.Contains(anthropicEfforts, opts.AnthropicEffort) {
+		return nil, fmt.Errorf("invalid anthropic effort %q, want one of %v", opts.AnthropicEffort, anthropicEfforts)
+	}
+
 	httpClient := createCustomHTTPClient(opts.SkipVerifySSL, opts.WrapTransport)
 
 	streamClient := *httpClient
@@ -162,6 +172,9 @@ func NewAnthropicClient(ctx context.Context, opts ClientOptions) (*AnthropicClie
 		streamClient: &streamClient,
 		streamIdle:   maxReplyWait,
 		apiKey:       apiKey,
+
+		thinkingType: opts.AnthropicThinkingType,
+		effort:       opts.AnthropicEffort,
 	}
 
 	return client, nil
@@ -355,13 +368,40 @@ type anthropicStreamDelta struct {
 }
 
 type anthropicRequest struct {
-	Model       string             `json:"model"`
-	MaxTokens   int                `json:"max_tokens"`
-	Messages    []anthropicMessage `json:"messages"`
-	System      string             `json:"system,omitempty"`
-	Tools       []anthropicTool    `json:"tools,omitempty"`
-	Stream      bool               `json:"stream,omitempty"`
-	Temperature *float64           `json:"temperature,omitempty"`
+	Model        string                 `json:"model"`
+	MaxTokens    int                    `json:"max_tokens"`
+	Messages     []anthropicMessage     `json:"messages"`
+	System       string                 `json:"system,omitempty"`
+	Tools        []anthropicTool        `json:"tools,omitempty"`
+	Stream       bool                   `json:"stream,omitempty"`
+	Temperature  *float64               `json:"temperature,omitempty"`
+	Thinking     *anthropicThinking     `json:"thinking,omitempty"`
+	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
+}
+
+type anthropicThinking struct {
+	Type string `json:"type"`
+}
+
+type anthropicOutputConfig struct {
+	Effort string `json:"effort"`
+}
+
+// Values NewAnthropicClient accepts; the API decides which of them a model
+// takes. "enabled" is left out: it needs budget_tokens, which the 5.x models reject.
+var (
+	anthropicThinkingTypes = []string{"adaptive", "disabled", "between_tools"}
+	anthropicEfforts       = []string{"low", "medium", "high", "xhigh", "max"}
+)
+
+// applyThinking sets the thinking fields the caller chose; unset fields stay off the request.
+func (c *AnthropicClient) applyThinking(r *anthropicRequest) {
+	if c.thinkingType != "" {
+		r.Thinking = &anthropicThinking{Type: c.thinkingType}
+	}
+	if c.effort != "" {
+		r.OutputConfig = &anthropicOutputConfig{Effort: c.effort}
+	}
 }
 
 type anthropicTool struct {
@@ -626,6 +666,7 @@ func (c *anthropicChat) Send(ctx context.Context, contents ...any) (ChatResponse
 		MaxTokens: anthropicMaxTokens(),
 		Messages:  tempMessages,
 	}
+	c.client.applyThinking(&reqBody)
 
 	if c.systemPrompt != "" {
 		reqBody.System = c.systemPrompt
@@ -749,6 +790,7 @@ func (c *anthropicChat) SendStreaming(ctx context.Context, contents ...any) (Cha
 		Messages:  tempMessages,
 		Stream:    true,
 	}
+	c.client.applyThinking(&reqBody)
 
 	if c.systemPrompt != "" {
 		reqBody.System = c.systemPrompt
