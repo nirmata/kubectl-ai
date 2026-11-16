@@ -18,6 +18,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 )
@@ -136,5 +137,32 @@ func TestWithTransportWrapper(t *testing.T) {
 	WithTransportWrapper(func(b http.RoundTripper) http.RoundTripper { return b })(&o)
 	if o.WrapTransport == nil {
 		t.Fatal("option did not set WrapTransport")
+	}
+}
+
+// TestCustomHTTPClientKeepsDefaultProxy checks that the built transport keeps the
+// Proxy of http.DefaultTransport instead of replacing it with ProxyFromEnvironment.
+func TestCustomHTTPClientKeepsDefaultProxy(t *testing.T) {
+	orig := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
+	var called bool
+	def := orig.(*http.Transport).Clone()
+	def.Proxy = func(*http.Request) (*url.URL, error) {
+		called = true
+		return nil, nil
+	}
+	http.DefaultTransport = def
+
+	tr, ok := createCustomHTTPClient(false, nil).Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("client transport is not an *http.Transport")
+	}
+	req, _ := http.NewRequest(http.MethodGet, "http://example.invalid/", nil)
+	if _, err := tr.Proxy(req); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("transport did not keep the default transport's Proxy")
 	}
 }
