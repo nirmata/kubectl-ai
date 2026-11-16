@@ -113,4 +113,13 @@ kubectl-ai --llm-provider=anthropic --model=claude-sonnet-5-5
 - Fixed `invalid_function_parameters` error when functions contain array parameters by ensuring `items` field is included in array schemas
 - Fixed schema conversion to handle nested structures (arrays of objects, objects with arrays, etc.)
 
+#### Shared HTTP Client Proxy
+
+**Changed**: The HTTP client shared by the openai, anthropic, azopenai, grok, llamacpp and gemini providers keeps the `Proxy` of `http.DefaultTransport`, as it is when the client is built, instead of always setting `http.ProxyFromEnvironment`.
+
+**Impact**:
+- No change while `http.DefaultTransport` is the standard library's, whose `Proxy` is `http.ProxyFromEnvironment`
+- A process that installs its own `*http.Transport` as `http.DefaultTransport` before building a client keeps that transport's proxy function
+- A process whose default transport has a nil `Proxy` gets no proxy from gollm, even when `HTTP_PROXY` or `HTTPS_PROXY` is set
+
 ---

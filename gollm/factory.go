@@ -369,10 +369,12 @@ func DefaultIsRetryableError(err error) bool {
 
 // createCustomHTTPClient returns an *http.Client that optionally skips SSL certificate verification.
 // This is shared by all providers that need custom HTTP transport.
+// The transport keeps the Proxy of http.DefaultTransport as it is when the client is
+// built, so a process that first installs its own *http.Transport as the default (for
+// example a guarded one) keeps that transport's proxy here.
 // A non-nil wrap is applied on top of the transport built here.
 func createCustomHTTPClient(skipVerify bool, wrap func(http.RoundTripper) http.RoundTripper) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = http.ProxyFromEnvironment
 	if skipVerify {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
