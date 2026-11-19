@@ -145,6 +145,11 @@ func (c *BedrockClient) SetResponseSchema(schema *Schema) error {
 // ListModels returns the list of supported Bedrock models
 func (c *BedrockClient) ListModels(ctx context.Context) ([]string, error) {
 	return []string{
+		"global.anthropic.claude-opus-5-5",             // Claude Opus 5.5 (adaptive thinking + effort)
+		"global.anthropic.claude-sonnet-5-5",           // Claude Sonnet 5.5 (adaptive thinking + effort)
+		"global.anthropic.claude-haiku-5-5",            // Claude Haiku 5.5 (adaptive thinking + effort)
+		"global.anthropic.claude-sonnet-4-6",           // Claude Sonnet 4.6 (adaptive thinking + effort)
+		"global.anthropic.claude-opus-4-6",             // Claude Opus 4.6 (adaptive thinking + effort)
 		"us.anthropic.claude-sonnet-4-20250514-v1:0",   // Claude Sonnet 4 (default)
 		"us.anthropic.claude-3-7-sonnet-20250219-v1:0", // Claude 3.7 Sonnet
 	}, nil
@@ -159,6 +164,27 @@ type bedrockChat struct {
 	toolConfig    *types.ToolConfiguration
 	functionDefs  []*FunctionDefinition
 	promptCaching bool
+
+	// thinkingMode and effort control extended thinking behavior on models
+	// where SupportsAdaptiveThinking is true. Both are empty by default,
+	// in which case no additionalModelRequestFields are sent and behavior is
+	// identical to the pre-existing Bedrock provider for all other models.
+	// Set via SetThinkingConfig.
+	//
+	// thinkingMode values: "" (not sent), "adaptive", "disabled",
+	// "between_tools". effort values: "" (not sent), "low", "medium", "high",
+	// "xhigh", "max". The library does not validate these — Bedrock returns an
+	// error for unsupported combinations (e.g. effort on Sonnet 4.5),
+	// and that error is propagated through wrapAWSError unchanged.
+	thinkingMode string
+	effort       string
+
+	// thinkingExtras is the smithy document built from thinkingMode/effort.
+	// It is constructed once in SetThinkingConfig and reused on every
+	// Send/SendStreaming call, instead of rebuilding the map and document
+	// wrapper on every turn of an agentic loop. nil ⇒ leave
+	// AdditionalModelRequestFields unset on the request.
+	thinkingExtras document.Interface
 }
 
 func (cs *bedrockChat) Initialize(history []*api.Message) error {
@@ -450,6 +476,14 @@ func (c *bedrockChat) Send(ctx context.Context, contents ...any) (ChatResponse, 
 		input.ToolConfig = c.toolConfig
 	}
 
+	// Forward thinking/effort to the underlying Anthropic model via
+	// AdditionalModelRequestFields. Bedrock merges this into the model's
+	// native request body verbatim. The smithy document is built once in
+	// SetThinkingConfig and reused here on every turn.
+	if c.thinkingExtras != nil {
+		input.AdditionalModelRequestFields = c.thinkingExtras
+	}
+
 	// Call the Bedrock Converse API
 	output, err := c.client.client.Converse(ctx, input)
 	if err != nil {
@@ -531,6 +565,13 @@ func (c *bedrockChat) SendStreaming(ctx context.Context, contents ...any) (ChatR
 	// Add tool configuration if functions are defined
 	if c.toolConfig != nil {
 		input.ToolConfig = c.toolConfig
+	}
+
+	// Forward thinking/effort to the underlying Anthropic model via
+	// AdditionalModelRequestFields. Must mirror the populator in Send() so
+	// streaming and non-streaming paths produce identical wire payloads.
+	if c.thinkingExtras != nil {
+		input.AdditionalModelRequestFields = c.thinkingExtras
 	}
 
 	// Start the streaming request
@@ -796,6 +837,77 @@ func (c *bedrockChat) SetFunctionDefinitions(functions []*FunctionDefinition) er
 	return nil
 }
 
+// SetThinkingConfig configures extended thinking and effort for this chat.
+//
+// On models where SupportsAdaptiveThinking is true, this causes subsequent
+// Send/SendStreaming calls to populate ConverseInput.AdditionalModelRequestFields
+// with the `thinking` and `output_config` keys, which Bedrock forwards
+// verbatim to the model. The smithy document is built once here and reused
+// on every turn.
+//
+// Parameters:
+//
+//	mode   - "" (do not send a thinking field), "adaptive", "disabled" or
+//	         "between_tools". Which values a model accepts differs:
+//	           - Opus 5.5: thinking is always on; "disabled" returns an error.
+//	             Pass "" or "adaptive" and lower effort instead.
+//	           - Sonnet 5.5: "disabled" returns an error; use "between_tools"
+//	             (effort "high" or below) to turn up-front thinking off.
+//	           - Haiku 5.5, Opus 5: "disabled" only at effort "high" or below.
+//	           - Opus 4.6/4.7/4.8, Sonnet 4.6, Sonnet 5: "adaptive" or "disabled".
+//	         "enabled" (budget_tokens) is not accepted; the 5.x models reject it.
+//	effort - "" (do not send), "low", "medium", "high", "xhigh" or "max".
+//	         The default when omitted is "medium" on Opus 5.5 and Haiku 5.5,
+//	         "high" elsewhere. "xhigh" needs Opus 4.7 or later.
+//
+// Both arguments are pass-through with no client-side validation. Bedrock
+// returns an error for unsupported combinations, and that error propagates
+// through wrapAWSError unchanged.
+//
+// Calling SetThinkingConfig("", "") clears any previously-set values and
+// restores the default behavior (no additionalModelRequestFields sent).
+//
+// This method is a concrete extension on *bedrockChat (not part of the
+// generic gollm.Chat interface). Callers obtain it via a type assertion:
+//
+//	if tc, ok := chat.(interface{ SetThinkingConfig(mode, effort string) }); ok {
+//	    tc.SetThinkingConfig("adaptive", "medium")
+//	}
+func (c *bedrockChat) SetThinkingConfig(mode, effort string) {
+	c.thinkingMode = mode
+	c.effort = effort
+	if extras := c.extendedThinkingExtras(); extras != nil {
+		c.thinkingExtras = document.NewLazyDocument(extras)
+	} else {
+		c.thinkingExtras = nil
+	}
+}
+
+// extendedThinkingExtras returns the map that becomes
+// ConverseInput.AdditionalModelRequestFields once wrapped as a smithy
+// document. SetThinkingConfig wraps it; this helper is kept separate (and
+// in-package) so tests can assert on the raw key/value shape — the
+// smithy-go codec only unmarshals into typed structs, not generic maps,
+// so a round-trip-via-document assertion isn't workable in tests.
+//
+// The key names (`thinking`, `output_config`) match Anthropic's wire format
+// because Bedrock forwards AdditionalModelRequestFields verbatim to the
+// underlying model — it does not transform key names or values.
+func (c *bedrockChat) extendedThinkingExtras() map[string]any {
+	if c.thinkingMode == "" && c.effort == "" {
+		return nil
+	}
+
+	extras := make(map[string]any, 2)
+	if c.thinkingMode != "" {
+		extras["thinking"] = map[string]any{"type": c.thinkingMode}
+	}
+	if c.effort != "" {
+		extras["output_config"] = map[string]any{"effort": c.effort}
+	}
+	return extras
+}
+
 // IsRetryableError determines if an error is retryable and prints debug info
 func (c *bedrockChat) IsRetryableError(err error) bool {
 	var apiErr *APIError
@@ -1049,12 +1161,77 @@ func wrapAWSError(err error) error {
 	return err
 }
 
+// adaptiveThinkingShortNames lists the Claude models that accept the
+// `thinking: {type: "adaptive"}` and `output_config.effort` request fields.
+// It's the single source of truth for both the alias map (which resolves
+// short names to Bedrock IDs) and SupportsAdaptiveThinking (which gates
+// those wire fields). When a new model ships, add it here.
+//
+// Matching is by substring, so "claude-opus-5" also covers
+// "claude-opus-5-5"; both are listed so each gets its own alias.
+var adaptiveThinkingShortNames = []string{
+	"claude-opus-5-5",
+	"claude-sonnet-5-5",
+	"claude-haiku-5-5",
+	"claude-opus-5",
+	"claude-sonnet-5",
+	"claude-opus-4-8",
+	"claude-opus-4-7",
+	"claude-opus-4-6",
+	"claude-sonnet-4-6",
+}
+
+// bedrockModelAliases maps short model names to Bedrock global cross-region
+// inference profile IDs, so callers can say "claude-sonnet-5-5" without
+// knowing the Bedrock-specific form. Full IDs (anything containing a dot)
+// bypass this map and pass through verbatim.
+var bedrockModelAliases = func() map[string]string {
+	m := make(map[string]string, len(adaptiveThinkingShortNames))
+	for _, name := range adaptiveThinkingShortNames {
+		m[name] = "global.anthropic." + name
+	}
+	return m
+}()
+
+// SupportsAdaptiveThinking reports whether the given model identifier refers
+// to a Claude model that accepts the `thinking` and `output_config` fields
+// (Opus/Sonnet 4.6, Opus 4.7/4.8, Opus/Sonnet 5, Opus/Sonnet/Haiku 5.5).
+//
+// The check is substring-based so it covers every form a caller might pass:
+//
+//   - short alias: "claude-sonnet-5-5"
+//   - global cross-region: "global.anthropic.claude-sonnet-5-5"
+//   - regional CRIS: "us.anthropic.claude-sonnet-5-5", "eu.anthropic..."
+//   - base regional: "anthropic.claude-sonnet-5-5"
+//
+// It does NOT match Sonnet 4, Sonnet 4.5, Opus 4.5, Haiku 4.5, or non-Claude
+// models; those return an error if `output_config.effort` or adaptive
+// thinking is sent to them.
+//
+// Exported so consumers that wrap gollm.Client to inject thinking config can
+// gate on the same definition the Bedrock provider uses.
+func SupportsAdaptiveThinking(model string) bool {
+	if model == "" {
+		return false
+	}
+	for _, name := range adaptiveThinkingShortNames {
+		if strings.Contains(model, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // getBedrockModel returns the model to use, checking in order:
-// 1. Explicitly provided model
+// 1. Explicitly provided model (resolved through bedrockModelAliases if it's a short name)
 // 2. Environment variable BEDROCK_MODEL
 // 3. Default model (Claude Sonnet 4)
 func getBedrockModel(model string) string {
 	if model != "" {
+		if resolved, ok := bedrockModelAliases[model]; ok {
+			klog.V(2).Infof("Resolved model alias %q -> %q", model, resolved)
+			return resolved
+		}
 		klog.V(2).Infof("Using explicitly provided model: %s", model)
 		return model
 	}
