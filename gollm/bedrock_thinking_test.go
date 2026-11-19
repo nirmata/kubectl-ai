@@ -19,21 +19,21 @@ import (
 	"testing"
 )
 
-// TestIsClaude46Family covers the exported model-gating predicate. The
+// TestSupportsAdaptiveThinking covers the exported model-gating predicate. The
 // Bedrock provider and any external decorators (e.g. webserver wrappers
 // that inject extended thinking) rely on this to decide whether to forward
 // the `thinking` and `output_config` fields. Getting it wrong is a bug in
 // either direction:
 //
-//   - false positive (matching a non-4.6 model) → Bedrock returns an error
+//   - false positive (matching a model without adaptive thinking) → Bedrock returns an error
 //     when output_config.effort is forwarded
-//   - false negative (missing a real 4.6 model) → thinking is silently never
+//   - false negative (missing a supported model) → thinking is silently never
 //     enabled and the user wonders why responses don't have thinking blocks
 //
-// Both directions are tested here. Adding a new 4.6 family member to
-// claude46ShortNames should make new "should match" cases pass without any
+// Both directions are tested here. Adding a new model to
+// adaptiveThinkingShortNames should make new "should match" cases pass without any
 // other code change — that's the centralization payoff.
-func TestIsClaude46Family(t *testing.T) {
+func TestSupportsAdaptiveThinking(t *testing.T) {
 	tests := []struct {
 		name  string
 		model string
@@ -47,6 +47,16 @@ func TestIsClaude46Family(t *testing.T) {
 		{"US regional CRIS sonnet", "us.anthropic.claude-sonnet-4-6", true},
 		{"EU regional CRIS opus", "eu.anthropic.claude-opus-4-6", true},
 		{"base regional sonnet", "anthropic.claude-sonnet-4-6", true},
+		{"short alias opus 5.5", "claude-opus-5-5", true},
+		{"short alias sonnet 5.5", "claude-sonnet-5-5", true},
+		{"short alias haiku 5.5", "claude-haiku-5-5", true},
+		{"global cross-region opus 5.5", "global.anthropic.claude-opus-5-5", true},
+		{"US regional CRIS sonnet 5.5", "us.anthropic.claude-sonnet-5-5", true},
+		{"base regional haiku 5.5", "anthropic.claude-haiku-5-5", true},
+		{"opus 5", "global.anthropic.claude-opus-5", true},
+		{"sonnet 5", "global.anthropic.claude-sonnet-5", true},
+		{"opus 4.8", "global.anthropic.claude-opus-4-8", true},
+		{"opus 4.7", "global.anthropic.claude-opus-4-7", true},
 
 		// Must NOT match — these are real Bedrock models that would error
 		// on output_config.effort
@@ -61,21 +71,22 @@ func TestIsClaude46Family(t *testing.T) {
 
 		// Edge cases
 		{"prefix-only must not match", "claude-sonnet", false},
-		{"hypothetical 4-7 must not match 4-6", "claude-sonnet-4-7", false},
+		{"no sonnet 4.7 exists", "claude-sonnet-4-7", false},
+		{"haiku 4.5 short name", "claude-haiku-4-5", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsClaude46Family(tt.model)
+			got := SupportsAdaptiveThinking(tt.model)
 			if got != tt.want {
-				t.Errorf("IsClaude46Family(%q) = %v, want %v", tt.model, got, tt.want)
+				t.Errorf("SupportsAdaptiveThinking(%q) = %v, want %v", tt.model, got, tt.want)
 			}
 		})
 	}
 }
 
 // TestGetBedrockModel_Aliases verifies that the short model aliases for the
-// 4.6 family resolve to their fully-qualified Bedrock IDs, while full IDs
+// adaptive-thinking models resolve to their fully-qualified Bedrock IDs, while full IDs
 // continue to pass through unchanged.
 func TestGetBedrockModel_Aliases(t *testing.T) {
 	tests := []struct {
@@ -92,6 +103,21 @@ func TestGetBedrockModel_Aliases(t *testing.T) {
 			name: "opus 4.6 alias resolves to global ID",
 			in:   "claude-opus-4-6",
 			want: "global.anthropic.claude-opus-4-6",
+		},
+		{
+			name: "opus 5.5 alias resolves to global ID",
+			in:   "claude-opus-5-5",
+			want: "global.anthropic.claude-opus-5-5",
+		},
+		{
+			name: "sonnet 5.5 alias resolves to global ID",
+			in:   "claude-sonnet-5-5",
+			want: "global.anthropic.claude-sonnet-5-5",
+		},
+		{
+			name: "haiku 5.5 alias resolves to global ID",
+			in:   "claude-haiku-5-5",
+			want: "global.anthropic.claude-haiku-5-5",
 		},
 		{
 			name: "fully-qualified Sonnet 4 ID passes through",
@@ -189,6 +215,23 @@ func TestBedrockChat_SetThinkingConfig_BuildsExtras(t *testing.T) {
 			want: map[string]any{
 				"thinking":      map[string]any{"type": "adaptive"},
 				"output_config": map[string]any{"effort": "max"},
+			},
+		},
+		{
+			name:         "between_tools with high effort (Sonnet 5.5, up-front thinking off)",
+			thinkingMode: "between_tools",
+			effort:       "high",
+			want: map[string]any{
+				"thinking":      map[string]any{"type": "between_tools"},
+				"output_config": map[string]any{"effort": "high"},
+			},
+		},
+		{
+			name:         "effort only, xhigh (Opus 5.5, thinking left at its default)",
+			thinkingMode: "",
+			effort:       "xhigh",
+			want: map[string]any{
+				"output_config": map[string]any{"effort": "xhigh"},
 			},
 		},
 	}
