@@ -43,17 +43,22 @@ This fork extends kubectl-ai with additional features and security enhancements 
 - Full support for tool/function calling with fine-grained streaming (`input_json_delta` events)
 - Dynamic model listing via Anthropic API with fallback to hardcoded list
 - Session persistence compatibility with proper handling of tool calls and tool results
+- Thinking and redacted_thinking blocks are kept in history in received order
+- A response cut off by `max_tokens` or the context window (an incomplete tool call, or no content), a refusal, a mid-stream `error` event, a text delta before its `content_block_start`, or a stream that ends without `message_stop` returns an error and the reply is not added to history; a truncated reply that ends in text is kept, with a warning
+- Message requests no longer stop at a fixed 180 s: a stream must send its headers, and then each event, within 10 minutes, the caller must start reading it within 10 minutes of its headers, an error response must send its whole body within 10 minutes of its headers, and it is otherwise bounded by the caller's context; a non-streaming request is bounded by 10 minutes
 
 **Configuration**:
 - API key via `ANTHROPIC_API_KEY` environment variable
 - Optional base URL via `ANTHROPIC_BASE_URL` environment variable or `ClientOptions.URL`
-- Optional model selection via `ANTHROPIC_MODEL` environment variable
-- Default model: `claude-sonnet-4-20250514`
+- Optional model selection via `ANTHROPIC_MODEL` environment variable, used when the caller passes no model
+- Optional output cap via `ANTHROPIC_MAX_TOKENS` environment variable (default 16384; thinking tokens count against it). Above about 21,000, a non-streaming `Send` is likely to reach its 10-minute bound
+- Default model, when the caller passes no model and `ANTHROPIC_MODEL` is unset: `claude-sonnet-5-5`
+- Optional `gollm.WithAnthropicThinkingType` (`adaptive`, `disabled`, `between_tools`) and `gollm.WithAnthropicEffort` (`low`, `medium`, `high`, `xhigh`, `max`), sent as the request's `thinking.type` and `output_config.effort` exactly as set; unset leaves the field off. Which value a model accepts is up to the API (for example `disabled` is rejected on some models), and a 400 is not retried
 
 **Usage**: 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-kubectl-ai --provider anthropic --model claude-sonnet-4-20250514
+kubectl-ai --llm-provider=anthropic --model=claude-sonnet-5-5
 ```
 
 **Implementation Details**:
@@ -107,5 +112,14 @@ kubectl-ai --provider anthropic --model claude-sonnet-4-20250514
 **Bug Fixes**:
 - Fixed `invalid_function_parameters` error when functions contain array parameters by ensuring `items` field is included in array schemas
 - Fixed schema conversion to handle nested structures (arrays of objects, objects with arrays, etc.)
+
+#### Shared HTTP Client Proxy
+
+**Changed**: The HTTP client shared by the openai, anthropic, azopenai, grok, llamacpp and gemini providers keeps the `Proxy` of `http.DefaultTransport`, as it is when the client is built, instead of always setting `http.ProxyFromEnvironment`.
+
+**Impact**:
+- No change while `http.DefaultTransport` is the standard library's, whose `Proxy` is `http.ProxyFromEnvironment`
+- A process that installs its own `*http.Transport` as `http.DefaultTransport` before building a client keeps that transport's proxy function
+- A process whose default transport has a nil `Proxy` gets no proxy from gollm, even when `HTTP_PROXY` or `HTTPS_PROXY` is set
 
 ---

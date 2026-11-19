@@ -70,7 +70,7 @@ func NewLlamaCppClient(ctx context.Context, opts ClientOptions) (*LlamaCppClient
 	}
 	klog.Infof("using llama.cpp with base url %v", baseURL.String())
 
-	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
+	httpClient := createCustomHTTPClient(opts.SkipVerifySSL, opts.WrapTransport)
 
 	return &LlamaCppClient{
 		baseURL:    baseURL,

@@ -154,22 +154,29 @@ You can use Anthropic's Claude API directly with your API key:
 # Set your Anthropic API key
 export ANTHROPIC_API_KEY=your_api_key_here
 
-# Use Claude Sonnet 4 (default)
-kubectl-ai --llm-provider=anthropic --model=claude-sonnet-4-20250514
+# Use Claude Sonnet 5.5
+kubectl-ai --llm-provider=anthropic --model=claude-sonnet-5-5
 
-# Use Claude 3.7 Sonnet
-kubectl-ai --llm-provider=anthropic --model=claude-3-7-sonnet-20250219
-
-# Override model via environment variable
-export ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
-kubectl-ai --llm-provider=anthropic
+# Cap output tokens per request (default 16384; thinking tokens count against it).
+# On models before Claude 4.5, input + max_tokens must fit the context window;
+# lower it if requests are rejected.
+export ANTHROPIC_MAX_TOKENS=16384
 
 # Use custom base URL (for proxy/gateway scenarios)
 export ANTHROPIC_BASE_URL=https://your-proxy.example.com
-kubectl-ai --llm-provider=anthropic
+kubectl-ai --llm-provider=anthropic --model=claude-sonnet-5-5
 ```
 
 The Anthropic provider supports configurable base URLs to work with proxies or gateways. If `ANTHROPIC_BASE_URL` is not set, it defaults to `https://api.anthropic.com`.
+
+Callers of the Go API can set the request's `thinking.type` (`adaptive`, `disabled` or `between_tools`) with `gollm.WithAnthropicThinkingType` and `output_config.effort` (`low`, `medium`, `high`, `xhigh` or `max`) with `gollm.WithAnthropicEffort`. Each is sent exactly as set, and left off the request when unset. The API decides which value a model accepts, and a rejected one comes back as a 400 that is not retried:
+
+| Model | Value that turns up-front thinking off |
+|-------|----------------------------------------|
+| Sonnet 5 | `disabled` |
+| Haiku 5.5, Opus 5 (at `high` effort or below) | `disabled` |
+| Sonnet 5.5 (at `high` effort or below) | `between_tools` |
+| Opus 5.5 | none; use `output_config.effort` |
 
 #### Using Azure OpenAI
 
