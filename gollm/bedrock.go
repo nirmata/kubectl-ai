@@ -145,9 +145,9 @@ func (c *BedrockClient) SetResponseSchema(schema *Schema) error {
 // ListModels returns the list of supported Bedrock models
 func (c *BedrockClient) ListModels(ctx context.Context) ([]string, error) {
 	return []string{
-		"global.anthropic.claude-opus-5-5",             // Claude Opus 5.5 (adaptive thinking + effort)
-		"global.anthropic.claude-sonnet-5-5",           // Claude Sonnet 5.5 (adaptive thinking + effort)
-		"global.anthropic.claude-haiku-5-5",            // Claude Haiku 5.5 (adaptive thinking + effort)
+		"anthropic.claude-opus-5-5",                    // Claude Opus 5.5 (adaptive thinking + effort)
+		"anthropic.claude-sonnet-5-5",                  // Claude Sonnet 5.5 (adaptive thinking + effort)
+		"anthropic.claude-haiku-5-5",                   // Claude Haiku 5.5 (adaptive thinking + effort)
 		"global.anthropic.claude-sonnet-4-6",           // Claude Sonnet 4.6 (adaptive thinking + effort)
 		"global.anthropic.claude-opus-4-6",             // Claude Opus 4.6 (adaptive thinking + effort)
 		"us.anthropic.claude-sonnet-4-20250514-v1:0",   // Claude Sonnet 4 (default)
@@ -1163,12 +1163,10 @@ func wrapAWSError(err error) error {
 
 // adaptiveThinkingShortNames lists the Claude models that accept the
 // `thinking: {type: "adaptive"}` and `output_config.effort` request fields.
-// It's the single source of truth for both the alias map (which resolves
-// short names to Bedrock IDs) and SupportsAdaptiveThinking (which gates
-// those wire fields). When a new model ships, add it here.
+// SupportsAdaptiveThinking gates those wire fields on this list. When a new
+// model ships, add it here.
 //
-// Matching is by substring, so "claude-opus-5" also covers
-// "claude-opus-5-5"; both are listed so each gets its own alias.
+// Matching is by substring, so "claude-opus-5" also covers "claude-opus-5-5".
 var adaptiveThinkingShortNames = []string{
 	"claude-opus-5-5",
 	"claude-sonnet-5-5",
@@ -1181,17 +1179,19 @@ var adaptiveThinkingShortNames = []string{
 	"claude-sonnet-4-6",
 }
 
-// bedrockModelAliases maps short model names to Bedrock global cross-region
-// inference profile IDs, so callers can say "claude-sonnet-5-5" without
-// knowing the Bedrock-specific form. Full IDs (anything containing a dot)
-// bypass this map and pass through verbatim.
-var bedrockModelAliases = func() map[string]string {
-	m := make(map[string]string, len(adaptiveThinkingShortNames))
-	for _, name := range adaptiveThinkingShortNames {
-		m[name] = "global.anthropic." + name
-	}
-	return m
-}()
+// bedrockModelAliases maps short model names to Bedrock model IDs, so callers
+// can say "claude-sonnet-5-5" without knowing the Bedrock-specific form. Full
+// IDs (anything containing a dot) bypass this map and pass through verbatim.
+// Only IDs confirmed against the Bedrock model catalog are listed; other
+// models in adaptiveThinkingShortNames still pass SupportsAdaptiveThinking
+// but must be given as a full Bedrock ID.
+var bedrockModelAliases = map[string]string{
+	"claude-opus-5-5":   "anthropic.claude-opus-5-5",
+	"claude-sonnet-5-5": "anthropic.claude-sonnet-5-5",
+	"claude-haiku-5-5":  "anthropic.claude-haiku-5-5",
+	"claude-sonnet-4-6": "global.anthropic.claude-sonnet-4-6",
+	"claude-opus-4-6":   "global.anthropic.claude-opus-4-6",
+}
 
 // SupportsAdaptiveThinking reports whether the given model identifier refers
 // to a Claude model that accepts the `thinking` and `output_config` fields
@@ -1200,9 +1200,9 @@ var bedrockModelAliases = func() map[string]string {
 // The check is substring-based so it covers every form a caller might pass:
 //
 //   - short alias: "claude-sonnet-5-5"
-//   - global cross-region: "global.anthropic.claude-sonnet-5-5"
-//   - regional CRIS: "us.anthropic.claude-sonnet-5-5", "eu.anthropic..."
-//   - base regional: "anthropic.claude-sonnet-5-5"
+//   - Bedrock model ID: "anthropic.claude-sonnet-5-5"
+//   - cross-region inference profile: "global.anthropic.claude-sonnet-4-6",
+//     "us.anthropic...", "eu.anthropic..."
 //
 // It does NOT match Sonnet 4, Sonnet 4.5, Opus 4.5, Haiku 4.5, or non-Claude
 // models; those return an error if `output_config.effort` or adaptive
