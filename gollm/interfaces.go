@@ -100,6 +100,19 @@ type Schema struct {
 	Items       *Schema            `json:"items,omitempty"`
 	Description string             `json:"description,omitempty"`
 	Required    []string           `json:"required,omitempty"`
+
+	// Raw, when set, is sent to providers as the schema instead of the fields
+	// above, so JSON Schema keywords the struct does not model (enum,
+	// additionalProperties, anyOf, minItems, ...) survive.
+	Raw json.RawMessage `json:"-"`
+}
+
+func (s Schema) MarshalJSON() ([]byte, error) {
+	if len(s.Raw) > 0 {
+		return s.Raw, nil
+	}
+	type plain Schema
+	return json.Marshal(plain(s))
 }
 
 // ToRawSchema converts a Schema to a json.RawMessage.
